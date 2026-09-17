@@ -1,8 +1,17 @@
 {% extends "base.html" %}
 {% block title %}산업안전 통합관제 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
-<h1>산업안전 통합관제 (시연)</h1>
-<h2>각 현장의 여러 센서를 12초마다 실제 파이프라인(preview·Agent)으로 재계산합니다 — 정상으로 돌아오면 알림은 사라집니다</h2>
+<div class="page-header">
+  <div>
+    <h1>산업안전 통합관제 (시연)</h1>
+    <h2 style="margin-bottom:0;">각 현장의 여러 센서를 12초마다 실제 파이프라인(preview·Agent)으로 재계산합니다 — 정상으로 돌아오면 알림은 사라집니다</h2>
+  </div>
+  <select id="edge_profile">
+    {% for key, p in edge_profiles.items() %}
+    <option value="{{ key }}">{{ p.label }}</option>
+    {% endfor %}
+  </select>
+</div>
 
 <div id="site-grid" class="site-grid">
   {% for site in sites %}
@@ -19,6 +28,8 @@ function escapeHtml(s) {
   return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+let userChangedProfile = false;
+
 async function refreshControlRoom() {
   let data;
   try {
@@ -26,6 +37,13 @@ async function refreshControlRoom() {
     data = await res.json();
   } catch (e) {
     return;
+  }
+
+  // 서버가 알고 있는 현재 프로파일로 셀렉트를 맞춰준다(다른 사람이 바꿨을 수도 있으므로) —
+  // 단, 지금 사용자가 막 고른 직후라면(폴링 타이밍 겹침) 덮어쓰지 않는다.
+  const select = document.getElementById('edge_profile');
+  if (!userChangedProfile && data.edge_profile && select.value !== data.edge_profile) {
+    select.value = data.edge_profile;
   }
 
   for (const s of (data.sites || [])) {
@@ -52,7 +70,7 @@ async function refreshControlRoom() {
         : '';
       alertBox.className = 'site-alert alert-' + s.alert.severity;
       alertBox.innerHTML =
-        '<div class="feed-head"><span class="severity ' + s.alert.severity + '">' + s.alert.severity + '</span> <span class="stat">' + s.alert.logged_at + ' 갱신</span></div>' +
+        '<div class="feed-head"><span class="severity ' + s.alert.severity + '">' + s.alert.severity + '</span> <span class="stat">' + s.alert.logged_at + ' 갱신 · ' + escapeHtml(s.alert.edge_label || '') + ' ' + (s.alert.elapsed ?? '') + '초</span></div>' +
         equipHtml +
         '<div class="feed-narrative">' + escapeHtml(s.alert.narrative) + '</div>';
       alertBox.style.display = 'block';
@@ -65,5 +83,18 @@ async function refreshControlRoom() {
 
 refreshControlRoom();
 setInterval(refreshControlRoom, 5000);
+
+document.getElementById('edge_profile').addEventListener('change', async (e) => {
+  userChangedProfile = true;
+  try {
+    await fetch('/api/control-room/edge-profile', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({edge_profile: e.target.value}),
+    });
+  } catch (err) {
+    // 네트워크 오류는 다음 폴링 때 서버 상태로 다시 맞춰짐
+  }
+  setTimeout(() => { userChangedProfile = false; }, 8000);
+});
 </script>
 {% endblock %}

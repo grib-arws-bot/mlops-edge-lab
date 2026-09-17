@@ -20,3 +20,6 @@ __pycache__/
 *.egg-info/
 
 .DS_Store
+
+# Claude Code 세션 로컬 파일 — 프로젝트 소스 아님, 실수로 git add -A에 딸려 들어온 적 있음
+.claude/

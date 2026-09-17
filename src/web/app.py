@@ -445,6 +445,10 @@ _CONTROL_ROOM_SITES = {
 _CONTROL_ROOM_INTERVAL_SECONDS = 12
 
 _control_room_state: dict[str, dict] = {}
+# /simulate와 달리 통합관제는 여러 사람이 같이 보는 "관제실 화면 하나"라는 컨셉이라,
+# 요청마다 프로파일을 넘기는 게 아니라 서버 쪽 전역 설정 하나로 둔다(이 화면을 보는
+# 모두가 같은 조건을 본다) — EDGE_PROFILES는 /simulate와 동일한 것을 재사용.
+_control_room_edge_profile = "server"
 
 
 def _now_hms() -> str:
@@ -483,20 +487,25 @@ def _update_sensor(site: str, substance: str, event: dict, preview_result: dict)
     }
 
 
-def _run_control_room_agent(event: dict) -> dict:
+def _run_control_room_narrative(event: dict) -> dict:
     """백그라운드 스레드(run_in_executor)에서 호출됨 — asyncio 이벤트 루프를 LLM 추론
-    시간(수 초) 동안 막지 않기 위해 별도 스레드로 뺐다. _llm_lock으로 /api/narrate와
-    직렬화된다."""
-    with _llm_lock:
-        result = run_agent(event, _state["ctx"], _state["llm"])
-        _state["ctx"].notify_log.clear()
-        return to_dict(result)
+    시간(수 초) 동안 막지 않기 위해 별도 스레드로 뺐다. 선택된 엣지 프로파일이 서버
+    기본이면 인프로세스 모델을(_llm_lock으로 /api/narrate와 직렬화), 아니면 /simulate와
+    동일한 cgroup 에뮬레이션(_run_events_emulated)을 그대로 재사용한다."""
+    profile = EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES["server"])
+    if profile["cores"] is None:
+        with _llm_lock:
+            result = run_agent(event, _state["ctx"], _state["llm"])
+            _state["ctx"].notify_log.clear()
+            return to_dict(result)
+    return _run_events_emulated([event], profile["cores"], profile["mem_gb"])[0]
 
 
-def _set_site_alert(site: str, substance: str, severity: str, result: dict) -> None:
+def _set_site_alert(site: str, substance: str, severity: str, result: dict, elapsed: float) -> None:
     _control_room_state[site]["alert"] = {
         "substance": substance, "severity": severity, "narrative": result["narrative"],
         "equipment": result.get("equipment_status", []), "logged_at": _now_hms(),
+        "elapsed": elapsed, "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES["server"])["label"],
     }
 
 
@@ -527,8 +536,10 @@ async def _control_room_loop() -> None:
             METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=severity).inc()
 
             if severity != "정상":
-                result = await loop.run_in_executor(None, _run_control_room_agent, event)
-                _set_site_alert(site, substance, severity, result)
+                start = time.perf_counter()
+                result = await loop.run_in_executor(None, _run_control_room_narrative, event)
+                elapsed = round(time.perf_counter() - start, 2)
+                _set_site_alert(site, substance, severity, result, elapsed)
             else:
                 _clear_site_alert_if_owner(site, substance)
         except Exception as exc:  # noqa: BLE001 — 백그라운드 루프는 절대 죽으면 안 됨
@@ -537,10 +548,26 @@ async def _control_room_loop() -> None:
 
 @app.get("/control-room", response_class=HTMLResponse)
 def control_room(request: Request):
-    return templates.TemplateResponse(request, "control_room.html", {"sites": list(_CONTROL_ROOM_SITES.keys())})
+    return templates.TemplateResponse(
+        request, "control_room.html",
+        {"sites": list(_CONTROL_ROOM_SITES.keys()), "edge_profiles": EDGE_PROFILES},
+    )
 
 
 @app.get("/api/control-room/status")
 def control_room_status():
     sites = [{"name": name, **_control_room_state.get(name, {})} for name in _CONTROL_ROOM_SITES]
-    return JSONResponse({"sites": sites})
+    return JSONResponse({"sites": sites, "edge_profile": _control_room_edge_profile})
+
+
+@app.post("/api/control-room/edge-profile")
+async def set_control_room_edge_profile(request: Request):
+    """관제실 화면은 여러 사람이 같이 보는 하나의 화면이라, 여기서 바꾼 엣지 프로파일은
+    다음 백그라운드 틱부터 전역으로 적용된다(요청 보낸 사람만 바뀌는 게 아님)."""
+    global _control_room_edge_profile
+    payload = await request.json()
+    key = payload.get("edge_profile", "server")
+    if key not in EDGE_PROFILES:
+        return JSONResponse({"error": "알 수 없는 엣지 프로파일"}, status_code=400)
+    _control_room_edge_profile = key
+    return JSONResponse({"status": "ok", "edge_profile": key, "label": EDGE_PROFILES[key]["label"]})
