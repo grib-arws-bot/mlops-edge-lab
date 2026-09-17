@@ -154,7 +154,7 @@ def _pipeline_stages() -> list[dict]:
             "role": "센서 이벤트 → 간결한 한국어 알림 문장으로 바꾸는 능력을 익힘. 위험 판정 자체는 여기서도 LLM에게 안 맡김",
             "library": "Qwen3-4B-Instruct-2507(Apache-2.0) · peft(LoRA r=16) · trl(SFTTrainer) · MLflow",
             "stats": ft_stats,
-            "loop": "평가 기준 미달 시 자동 재학습 (구현됨 — train/auto_retrain.py)",
+            "loop": "평가 기준 미달 시 자동 재학습",
             "mlflow_hint": True,
         },
         {
@@ -180,7 +180,7 @@ def _pipeline_stages() -> list[dict]:
             "role": "위험도·장비 제어는 규칙이, 문서 검색·문구 작성은 LLM이 — 역할을 명시적으로 나눠 추적 가능하게 함",
             "library": "llama-cpp-python(tool-calling) · 자체 규칙 엔진(rules.py)",
             "stats": ["고위험 장비(가스차단·소화방출)는 자동 실행 안 함 — 승인 대기만", "모든 결정에 rule/llm 권한 태그 기록"],
-            "loop": "운영 피드백 루프 → 3번으로 순환 (구현됨 — 시뮬레이션 페이지 👍/👎 → incorporate_feedback.py)",
+            "loop": "운영 피드백 루프 → 3번으로 순환",
         },
         {
             "no": 7, "title": "엣지 배포·검증",
@@ -192,20 +192,9 @@ def _pipeline_stages() -> list[dict]:
     ]
 
 
-_REMAINING_WORK = [
-    "✅ 모델 레지스트리 — MLflow Model Registry에 등록 + Production 승격 구현(train/auto_retrain.py)",
-    "✅ 운영 모니터링 — Prometheus(/metrics)+Grafana 구축, SSH 터널 전용(infra/monitoring)",
-    "✅ 데이터 버저닝 — DVC로 data/raw·data/processed 버저닝(로컬 원격, 758개 파일)",
-    "🔶 CI/CD — GitHub Actions로 테스트 자동화는 완료. 배포(자체 호스팅 러너)는 AI 서버에 러너 등록이 아직 안 됨(보안 정책상 토큰 자동 발급이 막혀 사람이 직접 등록 필요)",
-    "실제 엣지 하드웨어 검증 — cgroup 에뮬레이션만 했고 진짜 디바이스 테스트는 아직",
-]
-
-
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse(
-        request, "index.html", {"stages": _pipeline_stages(), "remaining_work": _REMAINING_WORK}
-    )
+    return templates.TemplateResponse(request, "index.html", {"stages": _pipeline_stages()})
 
 
 _MAX_SENSORS = 5
