@@ -193,10 +193,11 @@ def _pipeline_stages() -> list[dict]:
 
 
 _REMAINING_WORK = [
-    "모델 레지스트리 — MLflow Tracking만 쓰는 중, 버전 승격(Staging→Production) 관리는 안 함",
-    "운영 모니터링 대시보드 — 지연시간·오류율·정확도 추이를 실시간으로 재는 도구(Prometheus/Grafana 등) 없음",
-    "데이터 버저닝 — 추출된 문서·학습 데이터에 버전 태그 없음(DVC 등 미사용)",
-    "CI/CD — git 저장소 자체가 아직 없어서 자동화된 빌드·테스트·배포 파이프라인 없음. 전부 SSH로 수동 실행 중",
+    "✅ 모델 레지스트리 — MLflow Model Registry에 등록 + Production 승격 구현(train/auto_retrain.py)",
+    "✅ 운영 모니터링 — Prometheus(/metrics)+Grafana 구축, SSH 터널 전용(infra/monitoring)",
+    "✅ 데이터 버저닝 — DVC로 data/raw·data/processed 버저닝(로컬 원격, 758개 파일)",
+    "🔶 CI/CD — GitHub Actions로 테스트 자동화는 완료. 배포(자체 호스팅 러너)는 AI 서버에 러너 등록이 아직 안 됨(보안 정책상 토큰 자동 발급이 막혀 사람이 직접 등록 필요)",
+    "실제 엣지 하드웨어 검증 — cgroup 에뮬레이션만 했고 진짜 디바이스 테스트는 아직",
 ]
 
 
