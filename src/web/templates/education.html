@@ -2,7 +2,32 @@
 {% block title %}교육 자료 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
 {% if deck_available %}
-<embed src="/static/deck.pdf" type="application/pdf" style="width: 100%; height: calc(100vh - 96px); border: 0; border-radius: 10px; display: block;">
+<div id="deck-container"><div class="card">교육 자료 불러오는 중...</div></div>
+<script>
+// 사내망 프록시가 가끔 요청을 퍼센트인코딩된 절대경로로 변조해 404를 내는 문제가
+// 실제로 관측됨(docs/의사결정_로그.md 42번, 57번) — 단순 <embed src="..."> 태그는
+// 이 실패를 감지·재시도할 방법이 없어서, fetch로 직접 받아 성공(status 200)했을 때만
+// blob URL로 임베딩하고, 실패하면 잠깐 쉬었다가 재시도한다.
+async function loadDeck(retries = 3) {
+  const container = document.getElementById('deck-container');
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch('/static/deck.pdf', { cache: 'no-store' });
+      if (resp.ok) {
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        container.innerHTML = '<embed src="' + url + '" type="application/pdf" style="width: 100%; height: calc(100vh - 96px); border: 0; border-radius: 10px; display: block;">';
+        return;
+      }
+    } catch (e) {
+      // 네트워크 오류 — 아래에서 재시도
+    }
+    if (attempt < retries) await new Promise(r => setTimeout(r, 700));
+  }
+  container.innerHTML = '<div class="card">교육 자료를 불러오지 못했습니다(사내망 프록시로 인한 일시적 오류일 수 있습니다). <a href="javascript:location.reload()">새로고침해서 다시 시도</a>해주세요.</div>';
+}
+loadDeck();
+</script>
 {% else %}
 <div class="card">교육 자료가 아직 준비되지 않았습니다. <code>docs/교육자료/MLOps-Edge-Lab_교육자료.pptx</code>를 확인해 주세요.</div>
 {% endif %}
