@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}산업안전 통합관제 | MLOps-Edge-Lab{% endblock %}
+{% block content %}
+<h1>산업안전 통합관제 (시연)</h1>
+<h2>여러 현장의 센서 이벤트를 12초마다 실제 파이프라인(preview·Agent)으로 재계산합니다 — 값을 미리 정해두지 않습니다</h2>
+
+<div class="control-room-layout">
+  <div id="site-grid" class="site-grid">
+    {% for site in sites %}
+    <div class="site-card" data-site="{{ site }}">
+      <div class="site-name">{{ site }}</div>
+      <div class="site-body">로딩 중...</div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="feed-panel">
+    <div class="feed-title">최근 알림</div>
+    <div id="feed-list"><div class="stat">아직 알림 없음</div></div>
+  </div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+async function refreshControlRoom() {
+  let data;
+  try {
+    const res = await fetch('/api/control-room/status');
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+
+  for (const s of (data.sites || [])) {
+    const card = document.querySelector('.site-card[data-site="' + CSS.escape(s.name) + '"]');
+    if (!card) continue;
+    const j = s.judgement || {};
+    const ev = s.event || {};
+    const eq = s.equipment || [];
+    const equipHtml = eq.length
+      ? eq.map(e => '<div class="equip-item equip-' + e.status + '"><span class="equip-dot"></span>' + escapeHtml(e.equipment) + '<span class="equip-status">' + escapeHtml(e.status) + '</span></div>').join('')
+      : '<span class="stat">장비 조치 없음</span>';
+    card.querySelector('.site-body').innerHTML =
+      '<div class="severity ' + (j.severity || '') + '">' + (j.severity || '-') + '</div>' +
+      '<div class="stat">' + escapeHtml(ev.substance || '') + ' ' + (ev.value ?? '') + (ev.unit || '') +
+      ' (임계 ' + (ev.threshold ?? '') + (ev.unit || '') + ')</div>' +
+      '<div class="equipment-grid" style="margin-top:8px;">' + equipHtml + '</div>' +
+      '<div class="mlflow-hint">갱신: ' + (s.updated_at || '-') + '</div>';
+  }
+
+  const feedList = document.getElementById('feed-list');
+  const feed = data.feed || [];
+  feedList.innerHTML = feed.length ? feed.map(f =>
+    '<div class="feed-item">' +
+      '<div class="feed-head"><span class="severity ' + f.severity + '">' + f.severity + '</span> <strong>' + escapeHtml(f.site) + '</strong> <span class="stat">' + f.logged_at + '</span></div>' +
+      '<div class="feed-narrative">' + escapeHtml(f.narrative) + '</div>' +
+    '</div>'
+  ).join('') : '<div class="stat">아직 알림 없음</div>';
+}
+
+refreshControlRoom();
+setInterval(refreshControlRoom, 5000);
+</script>
+{% endblock %}

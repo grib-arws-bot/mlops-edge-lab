@@ -10,11 +10,14 @@ HTML/JS로만 프론트를 구성 — 개발자 교육 트랙에서 "군더더�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -70,7 +73,10 @@ async def lifespan(_app: FastAPI):
     _state["ctx"] = ToolContext.load()
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
     _ensure_deck_pdf()
+    _init_control_room()
+    control_room_task = asyncio.create_task(_control_room_loop())
     yield
+    control_room_task.cancel()
     _state.clear()
 
 
@@ -87,7 +93,14 @@ METRIC_NARRATE_ERRORS = Counter("agent_narrate_errors_total", "Total /api/narrat
 METRIC_SEVERITY = Counter("agent_severity_total", "Judged severity counts", ["severity"])
 METRIC_EQUIPMENT_ACTUATED = Counter("agent_equipment_actuated_total", "Equipment actuation counts", ["equipment", "status"])
 METRIC_FEEDBACK = Counter("agent_feedback_total", "Feedback submissions", ["rating"])
+METRIC_CONTROL_ROOM_EVENTS = Counter("agent_control_room_events_total", "Autonomous control-room demo events", ["site", "severity"])
 METRIC_NARRATE_LATENCY = Histogram("agent_narrate_latency_seconds", "Time to complete /api/narrate", ["edge_profile"])
+
+# 인프로세스 llm 인스턴스는 하나뿐인데 /api/narrate(사용자 요청)와 통합관제 백그라운드
+# 루프가 둘 다 이걸 쓴다. llama.cpp의 Llama 객체는 동시 추론을 지원하지 않아서(같은 KV
+# 캐시를 두 스레드가 동시에 건드리면 꼬임) 락으로 직렬화한다 — 서로 겹치면 그냥 순서대로
+# 기다렸다가 처리된다(둘 다 실패시키는 것보단 나음).
+_llm_lock = threading.Lock()
 
 
 @app.get("/metrics")
@@ -371,7 +384,8 @@ async def api_narrate(request: Request):
     start = time.perf_counter()
     try:
         if profile["cores"] is None:
-            results = _run_events_inprocess(events)
+            with _llm_lock:
+                results = _run_events_inprocess(events)
         else:
             results = _run_events_emulated(events, profile["cores"], profile["mem_gb"])
     except Exception as exc:  # noqa: BLE001 — 데모 화면에 원인을 그대로 보여주기 위함
@@ -408,3 +422,114 @@ async def api_feedback(request: Request):
     with _FEEDBACK_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     return JSONResponse({"status": "saved"})
+
+
+# ── 산업안전 통합관제 (시연용) ──────────────────────────────────────────
+# 영업/기획 트랙 시연을 위한 페이지 — 사람이 값을 입력하는 /simulate와 달리, 여러 현장의
+# 센서 이벤트가 스스로 발생하는 것처럼 백그라운드에서 주기적으로 실제 파이프라인을 돌린다.
+# "그럴듯하게 보이는 가짜 숫자"가 아니라 매번 preview()/run_agent()로 실제 계산한 결과다
+# — 이 프로젝트 전체를 관통하는 원칙(하드코딩 대신 실제 산출물)과 동일하게 맞췄다.
+_CONTROL_ROOM_SITES = {
+    "본관 급식실 조리구역": "조리흄",
+    "본관 급식실 배식구역": "공기질",
+    "지하 기계실": "가스",
+    "실험동 가스저장실": "가스",
+    "2층 사무실": "공기질",
+    "체육관": "공기질",
+}
+_CONTROL_ROOM_INTERVAL_SECONDS = 12
+_CONTROL_ROOM_FEED_MAX = 30
+
+_control_room_state: dict[str, dict] = {}
+_control_room_feed: list[dict] = []
+
+
+def _now_hms() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def _random_event_for_site(site: str) -> dict:
+    category = _CONTROL_ROOM_SITES[site]
+    table, _action = CATEGORIES[category]
+    substance, unit, threshold, _range = random.choice(table)
+    # 정상이 더 자주 나오게 가중치를 둠 — 알림이 쉴 새 없이 뜨면 "위험 신호"의 의미가
+    # 옅어져서 오히려 데모로서 설득력이 떨어진다.
+    severity = random.choices(["정상", "주의", "심각"], weights=[55, 30, 15])[0]
+    ratio = SEVERITY_RATIO.get(severity, 0.6)
+    value = round(threshold * ratio, 2)
+    return {"category": category, "substance": substance, "value": value, "threshold": threshold, "unit": unit, "location": site}
+
+
+def _update_control_room_site(site: str, event: dict, preview_result: dict) -> None:
+    _control_room_state[site] = {
+        "event": event,
+        "judgement": preview_result["judgement"],
+        "equipment": preview_result["equipment_status"],
+        "updated_at": _now_hms(),
+    }
+
+
+def _init_control_room() -> None:
+    """서버 기동 시 각 현장을 정상 상태 기본값으로 채워둔다 — 첫 폴링 전에도 화면이
+    비어있지 않게 하기 위함."""
+    for site, category in _CONTROL_ROOM_SITES.items():
+        table, _action = CATEGORIES[category]
+        substance, unit, threshold, _range = table[0]
+        event = {
+            "category": category, "substance": substance, "unit": unit, "threshold": threshold,
+            "value": round(threshold * SEVERITY_RATIO["정상"], 2), "location": site,
+        }
+        _update_control_room_site(site, event, preview(event))
+
+
+def _run_control_room_agent(event: dict) -> dict:
+    """백그라운드 스레드(run_in_executor)에서 호출됨 — asyncio 이벤트 루프를 LLM 추론
+    시간(수 초) 동안 막지 않기 위해 별도 스레드로 뺐다. _llm_lock으로 /api/narrate와
+    직렬화된다."""
+    with _llm_lock:
+        result = run_agent(event, _state["ctx"], _state["llm"])
+        _state["ctx"].notify_log.clear()
+        return to_dict(result)
+
+
+def _record_control_room_alert(site: str, event: dict, result: dict) -> None:
+    _control_room_feed.append({
+        "site": site, "severity": result["judgement"]["severity"],
+        "narrative": result["narrative"], "equipment": result.get("equipment_status", []),
+        "logged_at": _now_hms(),
+    })
+    del _control_room_feed[:-_CONTROL_ROOM_FEED_MAX]
+    _control_room_state[site]["equipment"] = result.get("equipment_status", [])
+
+
+async def _control_room_loop() -> None:
+    """12초마다 무작위 현장 하나를 골라 실제 규칙 판정을 다시 계산하고, 주의/위험이면
+    LLM까지 돌려 알림 피드에 남긴다. 백그라운드 태스크가 예외로 죽으면 그 뒤로 통합관제
+    페이지가 영원히 멈춰버리므로, 매 틱을 try/except로 감싸 하나 실패해도 다음 틱은
+    계속되게 한다."""
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(_CONTROL_ROOM_INTERVAL_SECONDS)
+        try:
+            site = random.choice(list(_CONTROL_ROOM_SITES))
+            event = _random_event_for_site(site)
+            preview_result = preview(event)
+            _update_control_room_site(site, event, preview_result)
+            METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=preview_result["judgement"]["severity"]).inc()
+            if preview_result["judgement"]["severity"] != "정상":
+                result = await loop.run_in_executor(None, _run_control_room_agent, event)
+                _record_control_room_alert(site, event, result)
+        except Exception as exc:  # noqa: BLE001 — 백그라운드 루프는 절대 죽으면 안 됨
+            print(f"[control-room] tick 실패: {exc}")
+
+
+@app.get("/control-room", response_class=HTMLResponse)
+def control_room(request: Request):
+    return templates.TemplateResponse(request, "control_room.html", {"sites": list(_CONTROL_ROOM_SITES.keys())})
+
+
+@app.get("/api/control-room/status")
+def control_room_status():
+    sites = [{"name": name, **_control_room_state.get(name, {})} for name in _CONTROL_ROOM_SITES]
+    feed = list(reversed(_control_room_feed[-20:]))
+    return JSONResponse({"sites": sites, "feed": feed})
