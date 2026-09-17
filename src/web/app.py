@@ -20,9 +20,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from llama_cpp import Llama
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent import rules
@@ -48,6 +49,22 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="MLOps-Edge-Lab 데모", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(_HERE / "templates"))
+
+# 표준 MLOps 갭 중 "운영 모니터링" — Prometheus 클라이언트로 지표를 노출만 하고,
+# Prometheus/Grafana는 별도 docker-compose(infra/monitoring/)로 스크레이핑한다.
+# Grafana·Prometheus UI는 MLflow와 같은 이유로 SSH 터널 전용 — 8081은 서비스용으로 아낀다.
+METRIC_JUDGE_REQUESTS = Counter("agent_judge_requests_total", "Total /api/judge calls")
+METRIC_NARRATE_REQUESTS = Counter("agent_narrate_requests_total", "Total /api/narrate calls", ["edge_profile"])
+METRIC_NARRATE_ERRORS = Counter("agent_narrate_errors_total", "Total /api/narrate failures")
+METRIC_SEVERITY = Counter("agent_severity_total", "Judged severity counts", ["severity"])
+METRIC_EQUIPMENT_ACTUATED = Counter("agent_equipment_actuated_total", "Equipment actuation counts", ["equipment", "status"])
+METRIC_FEEDBACK = Counter("agent_feedback_total", "Feedback submissions", ["rating"])
+METRIC_NARRATE_LATENCY = Histogram("agent_narrate_latency_seconds", "Time to complete /api/narrate", ["edge_profile"])
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 def _file_mb(path: Path) -> float | None:
@@ -300,6 +317,7 @@ def simulate_form(request: Request):
 async def api_judge(request: Request):
     """① 즉시 반응 단계 — 규칙만으로 판정·장비 상태를 계산한다. LLM 호출이 전혀 없어서
     수 밀리초 안에 끝난다. 사용자가 '장비 제어는 즉시 동작해야 한다'고 요청한 부분."""
+    METRIC_JUDGE_REQUESTS.inc()
     payload = await request.json()
     events = _events_from_payload(payload.get("sensors", []))
     judged = []
@@ -307,6 +325,7 @@ async def api_judge(request: Request):
     for event in events:
         p = preview(event)
         judged.append({"event": event, "judgement": p["judgement"]})
+        METRIC_SEVERITY.labels(severity=p["judgement"]["severity"]).inc()
         for e in p["equipment_status"]:
             equipment_map[e["equipment"]] = e["status"]
     equipment = [{"equipment": n, "status": equipment_map[n]} for n in _ALL_EQUIPMENT]
@@ -319,7 +338,9 @@ async def api_narrate(request: Request):
     추적까지 완성한다. 시간이 걸리는 부분이라 프론트가 이 호출 동안 스톱워치를 보여준다."""
     payload = await request.json()
     events = _events_from_payload(payload.get("sensors", []))
-    profile = EDGE_PROFILES.get(payload.get("edge_profile", "server"), EDGE_PROFILES["server"])
+    profile_key = payload.get("edge_profile", "server")
+    profile = EDGE_PROFILES.get(profile_key, EDGE_PROFILES["server"])
+    METRIC_NARRATE_REQUESTS.labels(edge_profile=profile_key).inc()
 
     if not events:
         return JSONResponse({"error": "최소 1개 센서를 활성화해주세요."}, status_code=400)
@@ -331,8 +352,13 @@ async def api_narrate(request: Request):
         else:
             results = _run_events_emulated(events, profile["cores"], profile["mem_gb"])
     except Exception as exc:  # noqa: BLE001 — 데모 화면에 원인을 그대로 보여주기 위함
+        METRIC_NARRATE_ERRORS.inc()
         return JSONResponse({"error": str(exc)}, status_code=500)
     elapsed = round(time.perf_counter() - start, 2)
+    METRIC_NARRATE_LATENCY.labels(edge_profile=profile_key).observe(elapsed)
+    for r in results:
+        for e in r.get("equipment_status", []):
+            METRIC_EQUIPMENT_ACTUATED.labels(equipment=e["equipment"], status=e["status"]).inc()
 
     return JSONResponse({
         "results": results,
@@ -349,6 +375,7 @@ async def api_feedback(request: Request):
     학습 데이터로 변환해 다음 재학습(auto_retrain.py)에 반영한다. 매 피드백마다 즉시
     재학습하지 않는 이유: 노이즈 하나에 모델이 흔들리는 걸 막기 위해 배치로 처리한다."""
     payload = await request.json()
+    METRIC_FEEDBACK.labels(rating=payload.get("rating", "unknown")).inc()
     _FEEDBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "event": payload.get("event"), "narrative": payload.get("narrative"),

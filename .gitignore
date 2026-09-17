@@ -1,8 +1,13 @@
-# 원본 데이터·산출물은 git 대상 아님 — 서버(AI 서버 홈 디렉토리)에만 있음
-data/
+# 데이터 자체는 DVC가 버저닝한다(.dvc 포인터 파일만 git 추적) — infra/의사결정_로그 참고.
+# data/ 를 통째로 막지 않는다 — dvc add가 만드는 data/raw.dvc, data/processed.dvc는
+# git에 커밋되어야 함(DVC가 그 안의 실제 데이터 경로는 알아서 별도로 무시 처리함).
 experiments/
 mlruns/
+mlflow/
+llama.cpp/
 *.gguf
+.dvc/cache
+.dvc/tmp
 
 __pycache__/
 *.pyc
