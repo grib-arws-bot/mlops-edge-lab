@@ -79,15 +79,15 @@ s = deck.add_body_3level(
     headline="8단계로 구성된 엔드투엔드 MLOps 파이프라인",
     items=[
         {"level": 0, "text": "1~3단계 — 데이터에서 모델까지"},
-        {"level": 1, "text": "① 인프라: uv · MLflow · tmux"},
-        {"level": 1, "text": "② 데이터 추출: 문서 738건 → 텍스트"},
-        {"level": 2, "text": "HWP·PDF·이미지·ZIP 폴백 사슬"},
-        {"level": 2, "text": "③ 파인튜닝: Qwen3-4B + LoRA"},
+        {"level": 1, "text": "① 인프라: uv(venv+lock) · MLflow 3.16(SQLite) · tmux"},
+        {"level": 1, "text": "② 데이터 추출: 문서 738건 → 텍스트, 형식별 폴백 사슬"},
+        {"level": 2, "text": "pymupdf(PDF) · pyhwp(HWP) · LibreOffice(레거시) · Tesseract(OCR)"},
+        {"level": 1, "text": "③ 파인튜닝: Qwen3-4B-Instruct-2507 + LoRA(r=16, alpha=32)"},
         {"level": 0, "text": "4~6단계 — 경량화에서 서빙까지"},
-        {"level": 1, "text": "④ 양자화: GGUF Q4_K_M (7.5GB→2.3GB)"},
-        {"level": 2, "text": "⑤ RAG: 문서 근거 기반 응답 생성"},
-        {"level": 1, "text": "⑥ Agent: 규칙(판정) · LLM(문구) 역할 분리"},
-        {"level": 0, "text": "7~8단계 — 엣지 검증 + 표준 MLOps 4요소"},
+        {"level": 1, "text": "④ 양자화: llama.cpp GGUF Q4_K_M (7.5GB→2.3GB, 3.2배)"},
+        {"level": 2, "text": "⑤ RAG: e5-small 임베딩 + FAISS(IndexFlatIP), 청크 12,964개"},
+        {"level": 1, "text": "⑥ Agent: 규칙(판정) · LLM(문구·도구호출) 역할 분리"},
+        {"level": 0, "text": "7~8단계 — 엣지 검증(cgroup 2코어 7.32 tok/s) + 표준 MLOps 4요소(레지스트리·모니터링·DVC·CI)"},
     ],
 )
 fix_chapter_label(s, "Ⅰ")
@@ -115,6 +115,44 @@ fix_chapter_label(s, "Ⅰ")
 # ── Ⅱ. 개발자 레퍼런스 아키텍처 ──────────────────
 deck.add_chapter("Ⅱ", "개발자 레퍼런스 아키텍처")
 
+s = deck.add_body_2col(
+    headerSub="1. 인프라 스택 선택",
+    headline="새 도구 도입보다 재현성에 필요한 최소한만 추가",
+    left_title="검토했지만 보류한 대안",
+    left_items=[
+        "venv — 가장 단순하지만 lock 파일 없어 재현성 약함",
+        "conda — 이 서버 용도엔 무겁고 불필요",
+        "파일 기반 실험 기록 — 조건 검색·비교가 불편",
+        "systemd user service — 재부팅 생존엔 유리하나 초기 설정 부담",
+    ],
+    right_title="채택 + 근거",
+    right_items=[
+        "uv — lock 파일로 버전 고정, MLOps 핵심가치인 재현성 확보",
+        "MLflow Tracking(SQLite mlflow.db) — 조건 검색 가능하면서 백업은 파일 하나로 간단",
+        "tmux 세션 — SSH 끊김에도 프로세스 생존, 재부팅 대응은 필요해지면 systemd로 승격 예정",
+        "FastAPI — 신규 채택 아님, MLflow가 이미 써서 venv에 있던 걸 재사용",
+    ],
+)
+fix_chapter_label(s, "Ⅱ")
+
+s = deck.add_body_3level(
+    headerSub="2. 데이터 추출 설계",
+    headline="포맷별 폴백 사슬 — 실패해도 조용히 넘어가지 않고 이유를 남긴다",
+    items=[
+        {"level": 0, "text": "PDF — pymupdf(fitz) 채택"},
+        {"level": 1, "text": "BidRadar의 pypdf 대신 선택 — 텍스트 추출 품질 우수"},
+        {"level": 1, "text": "HWP — pyhwp(hwp5txt) 1차, LibreOffice 2차 안전망"},
+        {"level": 2, "text": "OCR용 페이지→이미지 렌더링이 같은 라이브러리에 있어 poppler 등 외부 도구 불필요(AGPL이지만 사내 학습용이라 허용)"},
+        {"level": 2, "text": "BidRadar가 pyhwp만으로 이미 완전 구현·검증해둔 걸 확인 후 재사용 — 더 가볍고 안전"},
+        {"level": 0, "text": "레거시(DOC/XLS) — LibreOffice headless로 PDF 변환 후 PDF 추출기 재사용"},
+        {"level": 1, "text": "포맷별 전용 파서를 안 만들기 위함 — 'OCR 폴백' 로직을 PDF 경로 한 곳에만 두면 포맷이 늘어도 변환 단계만 추가하면 됨"},
+        {"level": 2, "text": "안정성 보강 — 확장자 오표기(매직바이트 PK=zip/CFBF=OLE 재확인)·한글 zip 파일명(CP437→CP949 복원)"},
+        {"level": 1, "text": "⚠ 실측: 738/738건 처리 — 성공 판정 기준은 비어있지 않음+글자수 임계값뿐"},
+        {"level": 0, "text": "성공 ≠ 정확 — 품질 샘플 검수(사람 대조)는 향후 과제로 명시적으로 남김"},
+    ],
+)
+fix_chapter_label(s, "Ⅱ")
+
 table1_rows = [
     ["모델", "라이선스", "한국어", "크기", "비고"],
     ["Qwen3", "Apache 2.0", "최상위권", "0.6B~32B", "채택 — 엣지~서버 한 계열"],
@@ -123,75 +161,156 @@ table1_rows = [
     ["EXAONE 4.0", "NC (비상업)", "최상", "1.2B~32B", "한국어 최상, 상업 불가"],
 ]
 s = deck.add_body_table(
-    headerSub="1. 베이스 모델 선택 기준",
-    headline="상용 가능 오픈웨이트 모델 비교 — Qwen3 채택",
+    headerSub="3. 베이스 모델 선택",
+    headline="선정 기준(상업 라이선스·한국어 품질·엣지~서버 크기 계열) — Qwen3 채택",
 )
 fill_table(s, table1_rows)
 fix_chapter_label(s, "Ⅱ")
 
 s = deck.add_body_2col(
-    headerSub="2. 양자화 방식 선택 기준",
-    headline="Q4_K_M — 엣지 배포용 범용 기본값으로 채택",
-    left_title="후보 비교 (4B 기준)",
+    headerSub="4. 파인튜닝 방법론",
+    headline="LoRA(r=16) — 3B~4B급이 20GB VRAM에 여유 있어 QLoRA는 보류",
+    left_title="검토한 대안",
     left_items=[
-        "Q8_0 — 거의 무손실, 4.3GB",
-        "Q5_K_M — 품질 우선, 2.7GB",
-        "Q4_K_M — 범용 기본값, 2.3GB",
-        "Q3_K_M — 초경량, 1.9GB",
+        "Full Fine-tuning — 전체 파라미터 학습, GPU 메모리·저장공간 부담 큼",
+        "QLoRA(4bit) — 더 좁은 VRAM에서 더 큰 모델 학습 시 유리하나 지금은 불필요",
+        "Qwen2.5-3B-Instruct — 최초 배관 검증에 사용, 이후 세대 교체",
+        "EXAONE·Upstage Solar — 한국어 품질은 좋으나 각각 라이선스(비상업)·크기(엣지 부적합)로 제외",
     ],
-    right_title="채택 근거",
+    right_title="채택 + 근거",
     right_items=[
-        "크기 절반 이하, 품질 92~95% 유지",
-        "K-quant 계열이 legacy보다 우수",
-        "실측상 CPU·GPU 모두 실용 속도",
-        "RAM 빠듯하면 Q3_K_M로 대체 가능",
+        "LoRA r=16, alpha=32, target=q/k/v/o_proj, bf16 — transformers+peft+trl(SFTTrainer)+accelerate",
+        "Qwen3-4B-Instruct-2507로 교체 — 같은 Apache-2.0 계열 세대업, 코드 변경은 모델명 한 줄",
+        "NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 — RTX 4000(NVLink 없음)에서 GPU간 P2P 통신 시도시 죽는 문제 우회",
+        "평가는 ROUGE-L 자동 채점 후 MLflow 기록 — 재학습 자동화(auto_retrain.py)의 판정 기준으로 재사용",
+    ],
+)
+fix_chapter_label(s, "Ⅱ")
+
+s = deck.add_body_2col(
+    headerSub="5. 양자화 방식 선택",
+    headline="K-quant 계열의 Q4_K_M — '범용 기본값'으로 크기 절반 이하, 품질 92~95% 유지",
+    left_title="검토한 대안",
+    left_items=[
+        "Legacy(Q4_0/Q8_0) — 32개 가중치당 스케일 1개뿐, 같은 크기 기준 K-quant보다 손실 큼",
+        "I-quant(IQ4 등) — imatrix 보정 필요, 4비트대에선 이득 작아 보류(2~3비트 갈 때 재고)",
+        "Q5_K_M/Q6_K — 품질은 좋지만 절감 폭 작음(2.7~3.3GB)",
+        "ONNX/TensorRT — 별도 변환 스택 필요, GPU 특화라 CPU 엣지 대응에 불리",
+    ],
+    right_title="채택 + 근거",
+    right_items=[
+        "K-quant 계열 — 레이어별 민감도 반영해 섞어 저장, 같은 크기 기준 legacy보다 우수",
+        "Q4_K_M 채택 — 7.5GB→2.3GB(3.2배 실측), 범용 기본값",
+        "런타임은 llama.cpp(GGUF) — CPU 전용 1차 빌드 후 CUDA 빌드 병행(build/ vs build-cuda/, 같은 소스)",
+        "GGUF 변환 의존성이 torch를 CPU빌드로 강제 설치하려 해서 gguf·sentencepiece만 개별 설치해 회피",
     ],
 )
 fix_chapter_label(s, "Ⅱ")
 
 s = deck.add_body_stats(
-    headerSub="3. 성능 실측치",
-    headline="같은 GGUF 파일 하나로 CPU·GPU 모두 대응",
+    headerSub="6. 성능 실측치",
+    headline="같은 GGUF 파일 하나로 CPU·GPU 모두 대응 (llama-bench, Q4_K_M)",
     stats=[
-        {"num": "23.6tok/s", "label": "CPU 8스레드 생성 속도"},
-        {"num": "87.0tok/s", "label": "GPU RTX4000 Ada 생성 속도"},
-        {"num": "3.7배", "label": "GPU 가속 배율"},
+        {"num": "23.6tok/s", "label": "CPU(Xeon 8스레드) 생성 tg128"},
+        {"num": "87.0tok/s", "label": "GPU(RTX4000 Ada) 생성 tg128"},
+        {"num": "3.7배", "label": "GPU 가속 배율 (프롬프트 처리는 18.7배)"},
         {"num": "7.3tok/s", "label": "엣지 에뮬레이션(2코어) 실측"},
     ],
 )
 fix_chapter_label(s, "Ⅱ")
 
-s = deck.add_body_3col(
-    headerSub="4. 3대 핵심 기술 스택",
-    headline="파인튜닝 · RAG · Agent — 역할이 다른 세 기술의 조합",
-    cards=[
-        {"title": "sLLM 파인튜닝", "items": ["Qwen3-4B + LoRA(r=16)", "도메인 문체 학습", "판정은 LLM에 안 맡김"]},
-        {"title": "RAG", "items": ["e5-small 임베딩 + FAISS", "안전문서 12,964개 조각", "근거 없으면 '모른다'"]},
-        {"title": "Agent", "items": ["규칙: 위험도·장비 제어", "LLM: 검색·문구 작성", "결정마다 권한 태그 기록"]},
+s = deck.add_body_2col(
+    headerSub="7. RAG 설계",
+    headline="'근거 없으면 모른다' — 프롬프트에 명시해 사실 아닌 답변을 막는다",
+    left_title="검토한 대안",
+    left_items=[
+        "BAAI/bge-m3 — 더 크고 정확하지만 무거움, 검색 품질 부족 시 교체 후보로 남김",
+        "Milvus/Chroma/pgvector — 별도 서버 프로세스 필요",
+        "문장 단위·고정 길이 청킹 — 문맥이 잘리기 쉬움",
+        "재순위화(rerank) 모델 추가 — 정확도는 오르지만 지연시간 증가, 엣지 실시간성과 상충되어 보류",
+    ],
+    right_title="채택 + 근거",
+    right_items=[
+        "intfloat/multilingual-e5-small(~470MB) — 엣지에서 실시간 질의해야 해서 가벼운 쪽 우선",
+        "FAISS IndexFlatIP — 프로세스 내 인메모리, llama-cpp-python과 같은 '서버 프로세스 없이' 철학",
+        "문단 슬라이딩 윈도우(700자, 겹침 100자) — 문맥 보존, 실제 738건→청크 12,964개",
+        "근거 문서 없으면 '모른다' + 출처 표시를 시스템 프롬프트에 명시",
     ],
 )
 fix_chapter_label(s, "Ⅱ")
 
 s = deck.add_body_3level(
-    headerSub="5. 설계 원칙",
-    headline="위험 판정은 항상 규칙, LLM은 언어만 담당",
+    headerSub="8. Agent 설계 원칙",
+    headline="위험 판정은 항상 규칙, LLM은 언어(문구·검색)만 담당",
     items=[
-        {"level": 0, "text": "원칙 1 — 판정은 규칙, 서술은 LLM"},
-        {"level": 1, "text": "위험도(정상·주의·위험)는 임계값 규칙이 판정"},
-        {"level": 1, "text": "LLM은 검색 여부·문구 작성만 자율판단"},
-        {"level": 2, "text": "파인튜닝 평가서 LLM 오판 실제 발견 → 이 원칙으로 해결"},
-        {"level": 2, "text": "장비 제어(가스차단기 등)도 규칙이 결정"},
-        {"level": 0, "text": "원칙 2 — 고위험 장비는 자동 실행 금지"},
-        {"level": 1, "text": "저위험(환풍기)만 즉시 자동 실행"},
-        {"level": 2, "text": "고위험(가스차단·소화방출)은 승인 대기만"},
-        {"level": 1, "text": "모든 결정에 규칙/LLM 권한 태그로 추적"},
-        {"level": 0, "text": "원칙 3 — 표준 MLOps 4요소(레지스트리·모니터링·버저닝·CI/CD) 구현"},
+        {"level": 0, "text": "원칙 — 판정은 규칙, 서술은 LLM"},
+        {"level": 1, "text": "위험도(정상·주의·위험, 임계값 1.5배 placeholder)는 rules.py가 판정, LLM 재판정 금지(시스템 프롬프트 명시)"},
+        {"level": 1, "text": "LLM은 search_guidelines 도구 호출 여부·검색어만 스스로 판단"},
+        {"level": 2, "text": "파인튜닝 평가서 발견한 'LLM 과대판정' 문제(정상을 초과로 오판)를 이 구조로 해결"},
+        {"level": 2, "text": "장비 제어(가스차단기 등)도 규칙이 결정 — LLM에게 안 맡김"},
+        {"level": 0, "text": "실전에서 겪은 버그"},
+        {"level": 1, "text": "llama-cpp-python이 Qwen3 GGUF의 <tool_call> 태그를 구조화 API로 안 넘겨줌 — 정규식(_TOOL_CALL_RE)으로 직접 파싱"},
+        {"level": 2, "text": "위험 사례 근거문서가 상황과 다소 겉도는 RAG 품질 이슈 관찰 — 미해결로 기록만"},
+        {"level": 1, "text": "검증: 정상=규칙만 즉시 처리(LLM 호출 없음)·주의=도구호출로 검색+조치문·위험=+에스컬레이션·사고리포트 초안 자동생성"},
+        {"level": 0, "text": "3단계 시나리오(정상·주의·위험) 전부 통과 확인"},
+    ],
+)
+fix_chapter_label(s, "Ⅱ")
+
+s = deck.add_body_2col(
+    headerSub="9. 장비 제어 안전설계",
+    headline="Decision(authority, action, detail) — 모든 결정에 규칙/LLM 권한 태그를 남긴다",
+    left_title="저위험 — 규칙이 즉시 자동 실행",
+    left_items=[
+        "환풍기 가동",
+        "소화설비 대기 전환",
+        "오작동 비용이 낮아 자동화 허용",
+        "LLM 응답을 기다리지 않고 즉시 실행 (/api/judge 실측 ~14ms)",
+    ],
+    right_title="고위험 — 자동 실행 금지, 승인 대기만",
+    right_items=[
+        "가스차단기 작동",
+        "소화설비 방출",
+        "오작동 시 공정 중단·피해가 커서 사람 승인 전제",
+        "장비 조치는 LLM이 서술하기 전에 규칙이 먼저 실행 → 결과를 LLM 프롬프트에 '사실'로 주입, LLM이 상태를 지어내지 못하게 함",
     ],
 )
 fix_chapter_label(s, "Ⅱ")
 
 s = deck.add_body_3level(
-    headerSub="6. 레퍼런스 아키텍처 재현 가이드",
+    headerSub="10. 엣지 에뮬레이션",
+    headline="실 하드웨어 없이 cgroup으로 하한선 추정 — 정확한 예측이 아니라는 점을 명시",
+    items=[
+        {"level": 0, "text": "할 수 있는 것 vs 못 하는 것"},
+        {"level": 1, "text": "cgroup으로 CPU 코어 수·메모리 상한 제한은 실제로 가능 — 하한선 추정에 유효"},
+        {"level": 1, "text": "명령어셋(AVX-512 유무)·디스크 I/O·발열 스로틀링은 재현 불가"},
+        {"level": 2, "text": "즉 '이 정도는 최소한 된다'는 하한선이지 정확한 예측은 아님"},
+        {"level": 2, "text": "방법: systemd-run --user --scope -p CPUQuota=N*100% -p MemoryMax=XG -p MemorySwapMax=0 -- taskset -c 코어들 명령"},
+        {"level": 0, "text": "sudo 불필요 — 유저 세션 cgroup으로 동작 확인"},
+        {"level": 1, "text": "실측: 2코어/32GB — tg128 7.32 tok/s (8스레드 23.63 대비 약 3.2배 느림)"},
+        {"level": 2, "text": "알림 문장 1건 생성에 4~5초 — 실용적인 속도로 판단"},
+        {"level": 1, "text": "함정: 모델(2.32GB)보다 작은 메모리 상한(2GB)+스왑 켜짐 → 조용히 무한 대기(30초 타임아웃까지 무출력)"},
+        {"level": 0, "text": "MemorySwapMax=0으로 스왑 차단 → 즉시 OOM kill(exit 137, 20초 내)로 깔끔한 실패 확보"},
+    ],
+)
+fix_chapter_label(s, "Ⅱ")
+
+table2_rows = [
+    ["요소", "도구", "상태", "핵심 결정", "근거"],
+    ["모델 레지스트리", "MLflow Model Registry", "완료", "create_model_version() 직접 호출로 우회 — register_model()이 최신 MLflow에서 Logged Model 요구해 실패", "46번"],
+    ["운영 모니터링", "Prometheus+Grafana", "완료", "MLflow와 동일 원칙 — SSH 터널 전용, 8081은 서비스 전용 포트로 아낌", "47번"],
+    ["데이터 버저닝", "DVC + 로컬 원격", "완료", ".dvc 포인터만 git 추적, 실 데이터는 dvc push로 ~/dvc-storage에", "48번"],
+    ["CI/CD", "GitHub Actions", "테스트 완료·배포 대기", "자체 호스팅 러너 등록 토큰 발급이 보안 정책상 자동 차단 — 사용자 수동 등록 필요", "49번"],
+]
+s = deck.add_body_table(
+    headerSub="11. 표준 MLOps 4요소",
+    headline="새 SaaS 도입 대신, 이미 쓰던 도구(MLflow·GitHub)를 확장하는 쪽을 우선",
+)
+fill_table(s, table2_rows)
+fix_chapter_label(s, "Ⅱ")
+
+s = deck.add_body_3level(
+    headerSub="12. 재현 가이드",
     headline="이 저장소 구조를 그대로 따라하면 재현 가능",
     items=[
         {"level": 0, "text": "소스 구조 (src/)"},
@@ -254,7 +373,7 @@ s = deck.add_body_3col(
 )
 fix_chapter_label(s, "Ⅲ")
 
-table2_rows = [
+table3_rows = [
     ["단계", "내용", "기간(안)", "산출물", "비고"],
     ["1", "현장 안전 PoC 고도화", "1~2개월", "실증 데모", "이번 프로젝트 결과물 기반"],
     ["2", "실제 센서·임계값 확보", "1개월", "정식 기준 반영", "현장 안전 담당자 협업 필요"],
@@ -265,7 +384,7 @@ s = deck.add_body_table(
     headerSub="4. 도입 로드맵 제안",
     headline="단계별 제품화 로드맵",
 )
-fill_table(s, table2_rows)
+fill_table(s, table3_rows)
 fix_chapter_label(s, "Ⅲ")
 
 s = deck.add_body_3level(

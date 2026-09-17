@@ -1,14 +1,8 @@
 {% extends "base.html" %}
 {% block title %}교육 자료 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
-<h1>교육 자료</h1>
-<h2>프로젝트 개요 · 개발자 레퍼런스 아키텍처 · 사업 활용 제안 — 3부 구성 PPT를 그대로 임베딩했습니다</h2>
-
 {% if deck_available %}
-<div class="card" style="padding: 0; overflow: hidden;">
-  <embed src="/static/deck.pdf" type="application/pdf" style="width: 100%; height: 82vh; border: 0; display: block;">
-</div>
-<div class="why"><a href="/static/deck.pdf" download>PDF 다운로드 →</a></div>
+<embed src="/static/deck.pdf" type="application/pdf" style="width: 100%; height: calc(100vh - 96px); border: 0; border-radius: 10px; display: block;">
 {% else %}
 <div class="card">교육 자료가 아직 준비되지 않았습니다. <code>docs/교육자료/MLOps-Edge-Lab_교육자료.pptx</code>를 확인해 주세요.</div>
 {% endif %}
