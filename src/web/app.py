@@ -429,29 +429,31 @@ async def api_feedback(request: Request):
 # 센서 이벤트가 스스로 발생하는 것처럼 백그라운드에서 주기적으로 실제 파이프라인을 돌린다.
 # "그럴듯하게 보이는 가짜 숫자"가 아니라 매번 preview()/run_agent()로 실제 계산한 결과다
 # — 이 프로젝트 전체를 관통하는 원칙(하드코딩 대신 실제 산출물)과 동일하게 맞췄다.
+#
+# 카드 하나 = 현장 하나. 카드 안에 멀티 센서(2~3개)를 두고, 그중 하나가 무작위로 바뀌면서
+# 이상 감지 시 장비 조치 + 자연어 안내(알림 박스)까지 같은 카드 안에서 전부 보여준다.
+# 그 센서가 다시 정상으로 돌아오면 알림 박스는 사라진다(사용자 요청) — "이상이 지금도
+# 진행 중인가"만 카드 하나만 보고 알 수 있게 하기 위함.
 _CONTROL_ROOM_SITES = {
-    "본관 급식실 조리구역": "조리흄",
-    "본관 급식실 배식구역": "공기질",
-    "지하 기계실": "가스",
-    "실험동 가스저장실": "가스",
-    "2층 사무실": "공기질",
-    "체육관": "공기질",
+    "본관 급식실 조리구역": {"category": "조리흄", "substances": ["일산화탄소", "오일미스트", "포름알데히드"]},
+    "본관 급식실 배식구역": {"category": "공기질", "substances": ["CO2", "미세먼지(PM10)", "온도"]},
+    "지하 기계실": {"category": "가스", "substances": ["수소", "헬륨"]},
+    "실험동 가스저장실": {"category": "가스", "substances": ["수소", "아르곤", "질소"]},
+    "2층 사무실": {"category": "공기질", "substances": ["CO2", "TVOC"]},
+    "체육관": {"category": "공기질", "substances": ["CO2", "습도"]},
 }
 _CONTROL_ROOM_INTERVAL_SECONDS = 12
-_CONTROL_ROOM_FEED_MAX = 30
 
 _control_room_state: dict[str, dict] = {}
-_control_room_feed: list[dict] = []
 
 
 def _now_hms() -> str:
     return time.strftime("%H:%M:%S")
 
 
-def _random_event_for_site(site: str) -> dict:
-    category = _CONTROL_ROOM_SITES[site]
-    table, _action = CATEGORIES[category]
-    substance, unit, threshold, _range = random.choice(table)
+def _random_event(site: str, substance: str) -> dict:
+    category = _CONTROL_ROOM_SITES[site]["category"]
+    unit, threshold = substance_lookup(category, substance)
     # 정상이 더 자주 나오게 가중치를 둠 — 알림이 쉴 새 없이 뜨면 "위험 신호"의 의미가
     # 옅어져서 오히려 데모로서 설득력이 떨어진다.
     severity = random.choices(["정상", "주의", "심각"], weights=[55, 30, 15])[0]
@@ -460,26 +462,25 @@ def _random_event_for_site(site: str) -> dict:
     return {"category": category, "substance": substance, "value": value, "threshold": threshold, "unit": unit, "location": site}
 
 
-def _update_control_room_site(site: str, event: dict, preview_result: dict) -> None:
-    _control_room_state[site] = {
-        "event": event,
-        "judgement": preview_result["judgement"],
-        "equipment": preview_result["equipment_status"],
-        "updated_at": _now_hms(),
-    }
-
-
 def _init_control_room() -> None:
-    """서버 기동 시 각 현장을 정상 상태 기본값으로 채워둔다 — 첫 폴링 전에도 화면이
-    비어있지 않게 하기 위함."""
-    for site, category in _CONTROL_ROOM_SITES.items():
-        table, _action = CATEGORIES[category]
-        substance, unit, threshold, _range = table[0]
-        event = {
-            "category": category, "substance": substance, "unit": unit, "threshold": threshold,
-            "value": round(threshold * SEVERITY_RATIO["정상"], 2), "location": site,
-        }
-        _update_control_room_site(site, event, preview(event))
+    """서버 기동 시 각 현장의 모든 센서를 정상 상태 기본값으로 채워둔다 — 첫 폴링 전에도
+    화면이 비어있지 않게 하기 위함. 알림(alert)은 처음엔 당연히 없음(None)."""
+    for site, spec in _CONTROL_ROOM_SITES.items():
+        sensors = {}
+        for substance in spec["substances"]:
+            unit, threshold = substance_lookup(spec["category"], substance)
+            sensors[substance] = {
+                "value": round(threshold * SEVERITY_RATIO["정상"], 2), "threshold": threshold,
+                "unit": unit, "severity": "정상", "updated_at": _now_hms(),
+            }
+        _control_room_state[site] = {"sensors": sensors, "alert": None}
+
+
+def _update_sensor(site: str, substance: str, event: dict, preview_result: dict) -> None:
+    _control_room_state[site]["sensors"][substance] = {
+        "value": event["value"], "threshold": event["threshold"], "unit": event["unit"],
+        "severity": preview_result["judgement"]["severity"], "updated_at": _now_hms(),
+    }
 
 
 def _run_control_room_agent(event: dict) -> dict:
@@ -492,33 +493,44 @@ def _run_control_room_agent(event: dict) -> dict:
         return to_dict(result)
 
 
-def _record_control_room_alert(site: str, event: dict, result: dict) -> None:
-    _control_room_feed.append({
-        "site": site, "severity": result["judgement"]["severity"],
-        "narrative": result["narrative"], "equipment": result.get("equipment_status", []),
-        "logged_at": _now_hms(),
-    })
-    del _control_room_feed[:-_CONTROL_ROOM_FEED_MAX]
-    _control_room_state[site]["equipment"] = result.get("equipment_status", [])
+def _set_site_alert(site: str, substance: str, severity: str, result: dict) -> None:
+    _control_room_state[site]["alert"] = {
+        "substance": substance, "severity": severity, "narrative": result["narrative"],
+        "equipment": result.get("equipment_status", []), "logged_at": _now_hms(),
+    }
+
+
+def _clear_site_alert_if_owner(site: str, substance: str) -> None:
+    """지금 켜진 알림이 '이 센서' 때문에 켜진 게 맞을 때만 끈다 — 다른 센서가 원인인
+    알림까지 같이 꺼버리는 걸 방지."""
+    alert = _control_room_state[site]["alert"]
+    if alert and alert["substance"] == substance:
+        _control_room_state[site]["alert"] = None
 
 
 async def _control_room_loop() -> None:
-    """12초마다 무작위 현장 하나를 골라 실제 규칙 판정을 다시 계산하고, 주의/위험이면
-    LLM까지 돌려 알림 피드에 남긴다. 백그라운드 태스크가 예외로 죽으면 그 뒤로 통합관제
-    페이지가 영원히 멈춰버리므로, 매 틱을 try/except로 감싸 하나 실패해도 다음 틱은
-    계속되게 한다."""
+    """12초마다 무작위 현장의 무작위 센서 하나를 골라 실제 규칙 판정을 다시 계산하고,
+    주의/위험이면 LLM까지 돌려 그 현장 카드의 알림으로 반영한다. 정상으로 돌아오면(그
+    알림을 유발한 센서일 때만) 알림을 지운다. 백그라운드 태스크가 예외로 죽으면 그 뒤로
+    통합관제 페이지가 영원히 멈춰버리므로, 매 틱을 try/except로 감싸 하나 실패해도 다음
+    틱은 계속되게 한다."""
     loop = asyncio.get_event_loop()
     while True:
         await asyncio.sleep(_CONTROL_ROOM_INTERVAL_SECONDS)
         try:
             site = random.choice(list(_CONTROL_ROOM_SITES))
-            event = _random_event_for_site(site)
+            substance = random.choice(_CONTROL_ROOM_SITES[site]["substances"])
+            event = _random_event(site, substance)
             preview_result = preview(event)
-            _update_control_room_site(site, event, preview_result)
-            METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=preview_result["judgement"]["severity"]).inc()
-            if preview_result["judgement"]["severity"] != "정상":
+            severity = preview_result["judgement"]["severity"]
+            _update_sensor(site, substance, event, preview_result)
+            METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=severity).inc()
+
+            if severity != "정상":
                 result = await loop.run_in_executor(None, _run_control_room_agent, event)
-                _record_control_room_alert(site, event, result)
+                _set_site_alert(site, substance, severity, result)
+            else:
+                _clear_site_alert_if_owner(site, substance)
         except Exception as exc:  # noqa: BLE001 — 백그라운드 루프는 절대 죽으면 안 됨
             print(f"[control-room] tick 실패: {exc}")
 
@@ -531,5 +543,4 @@ def control_room(request: Request):
 @app.get("/api/control-room/status")
 def control_room_status():
     sites = [{"name": name, **_control_room_state.get(name, {})} for name in _CONTROL_ROOM_SITES]
-    feed = list(reversed(_control_room_feed[-20:]))
-    return JSONResponse({"sites": sites, "feed": feed})
+    return JSONResponse({"sites": sites})

@@ -92,20 +92,19 @@
     .sim-layout { grid-template-columns: 1fr; }
   }
 
-  .control-room-layout { display: grid; grid-template-columns: 1fr 380px; gap: 20px; align-items: start; }
-  .site-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
-  .site-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-height: 168px; }
+  .site-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .site-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .site-name { font-weight: 700; margin-bottom: 8px; font-size: 0.92rem; }
-  .site-card .severity { font-size: 1.05rem; }
-  .feed-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; max-height: 680px; overflow-y: auto; }
-  .feed-title { font-weight: 700; margin-bottom: 10px; }
-  .feed-item { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
-  .feed-item:last-child { border-bottom: none; }
+  .sensor-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--border); font-size: 0.85rem; }
+  .sensor-row:last-child { border-bottom: none; }
+  .sensor-name { font-weight: 600; flex: 0 0 auto; }
+  .sensor-row .stat { margin: 0; flex: 1 1 auto; text-align: right; }
+  .sensor-row .severity { flex: 0 0 auto; font-size: 0.82rem; margin-left: 8px; }
+  .site-alert { margin-top: 10px; padding: 8px 10px; border-radius: 8px; border: 1px dashed var(--border); font-size: 0.85rem; }
+  .site-alert.alert-주의 { border-color: var(--caution); background: rgba(210,153,34,0.08); }
+  .site-alert.alert-위험 { border-color: var(--danger); background: rgba(248,81,73,0.08); }
   .feed-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
   .feed-narrative { color: var(--text); line-height: 1.4; }
-  @media (max-width: 900px) {
-    .control-room-layout { grid-template-columns: 1fr; }
-  }
 </style>
 </head>
 <body>

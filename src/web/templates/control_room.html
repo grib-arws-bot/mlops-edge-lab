@@ -2,21 +2,16 @@
 {% block title %}산업안전 통합관제 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
 <h1>산업안전 통합관제 (시연)</h1>
-<h2>여러 현장의 센서 이벤트를 12초마다 실제 파이프라인(preview·Agent)으로 재계산합니다 — 값을 미리 정해두지 않습니다</h2>
+<h2>각 현장의 여러 센서를 12초마다 실제 파이프라인(preview·Agent)으로 재계산합니다 — 정상으로 돌아오면 알림은 사라집니다</h2>
 
-<div class="control-room-layout">
-  <div id="site-grid" class="site-grid">
-    {% for site in sites %}
-    <div class="site-card" data-site="{{ site }}">
-      <div class="site-name">{{ site }}</div>
-      <div class="site-body">로딩 중...</div>
-    </div>
-    {% endfor %}
+<div id="site-grid" class="site-grid">
+  {% for site in sites %}
+  <div class="site-card" data-site="{{ site }}">
+    <div class="site-name">{{ site }}</div>
+    <div class="sensor-rows"><div class="stat">로딩 중...</div></div>
+    <div class="site-alert" style="display:none;"></div>
   </div>
-  <div class="feed-panel">
-    <div class="feed-title">최근 알림</div>
-    <div id="feed-list"><div class="stat">아직 알림 없음</div></div>
-  </div>
+  {% endfor %}
 </div>
 
 <script>
@@ -36,28 +31,36 @@ async function refreshControlRoom() {
   for (const s of (data.sites || [])) {
     const card = document.querySelector('.site-card[data-site="' + CSS.escape(s.name) + '"]');
     if (!card) continue;
-    const j = s.judgement || {};
-    const ev = s.event || {};
-    const eq = s.equipment || [];
-    const equipHtml = eq.length
-      ? eq.map(e => '<div class="equip-item equip-' + e.status + '"><span class="equip-dot"></span>' + escapeHtml(e.equipment) + '<span class="equip-status">' + escapeHtml(e.status) + '</span></div>').join('')
-      : '<span class="stat">장비 조치 없음</span>';
-    card.querySelector('.site-body').innerHTML =
-      '<div class="severity ' + (j.severity || '') + '">' + (j.severity || '-') + '</div>' +
-      '<div class="stat">' + escapeHtml(ev.substance || '') + ' ' + (ev.value ?? '') + (ev.unit || '') +
-      ' (임계 ' + (ev.threshold ?? '') + (ev.unit || '') + ')</div>' +
-      '<div class="equipment-grid" style="margin-top:8px;">' + equipHtml + '</div>' +
-      '<div class="mlflow-hint">갱신: ' + (s.updated_at || '-') + '</div>';
-  }
 
-  const feedList = document.getElementById('feed-list');
-  const feed = data.feed || [];
-  feedList.innerHTML = feed.length ? feed.map(f =>
-    '<div class="feed-item">' +
-      '<div class="feed-head"><span class="severity ' + f.severity + '">' + f.severity + '</span> <strong>' + escapeHtml(f.site) + '</strong> <span class="stat">' + f.logged_at + '</span></div>' +
-      '<div class="feed-narrative">' + escapeHtml(f.narrative) + '</div>' +
-    '</div>'
-  ).join('') : '<div class="stat">아직 알림 없음</div>';
+    const sensors = s.sensors || {};
+    const rows = Object.entries(sensors).map(([name, d]) =>
+      '<div class="sensor-row">' +
+        '<span class="sensor-name">' + escapeHtml(name) + '</span>' +
+        '<span class="stat">' + d.value + d.unit + ' (임계 ' + d.threshold + d.unit + ')</span>' +
+        '<span class="severity ' + d.severity + '">' + d.severity + '</span>' +
+      '</div>'
+    ).join('');
+    card.querySelector('.sensor-rows').innerHTML = rows || '<div class="stat">센서 없음</div>';
+
+    const alertBox = card.querySelector('.site-alert');
+    if (s.alert) {
+      const eq = s.alert.equipment || [];
+      const equipHtml = eq.length
+        ? '<div class="equipment-grid" style="margin: 6px 0;">' + eq.map(e =>
+            '<div class="equip-item equip-' + e.status + '"><span class="equip-dot"></span>' + escapeHtml(e.equipment) + '<span class="equip-status">' + escapeHtml(e.status) + '</span></div>'
+          ).join('') + '</div>'
+        : '';
+      alertBox.className = 'site-alert alert-' + s.alert.severity;
+      alertBox.innerHTML =
+        '<div class="feed-head"><span class="severity ' + s.alert.severity + '">' + s.alert.severity + '</span> <span class="stat">' + s.alert.logged_at + ' 갱신</span></div>' +
+        equipHtml +
+        '<div class="feed-narrative">' + escapeHtml(s.alert.narrative) + '</div>';
+      alertBox.style.display = 'block';
+    } else {
+      alertBox.style.display = 'none';
+      alertBox.innerHTML = '';
+    }
+  }
 }
 
 refreshControlRoom();
