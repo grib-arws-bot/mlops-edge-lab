@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}MLOps 파이프라인 | MLOps-Edge-Lab{% endblock %}
+{% block content %}
+<h1>MLOps 파이프라인이 실제로 어떻게 운영되는가</h1>
+<h2>각 단계에서 실측한 수치와, 그렇게 만든 이유 — 화살표는 데이터가 실제로 흐르는 방향입니다</h2>
+
+<div class="flow">
+  {% for s in stages %}
+  {% if not loop.first %}<div class="arrow">→</div>{% endif %}
+  <div class="stage-box">
+    <div><span class="stage-no">{{ s.no }}</span><strong>{{ s.title }}</strong></div>
+
+    <div class="stage-field"><span class="k">정의</span>{{ s.definition }}</div>
+    <div class="stage-field"><span class="k">역할</span>{{ s.role }}</div>
+    <div class="stage-field"><span class="k">모델/라이브러리</span>{{ s.library }}</div>
+
+    {% for stat in s.stats %}
+    <div class="stat">· {{ stat }}</div>
+    {% endfor %}
+
+    {% if s.mlflow_hint %}
+    <div class="mlflow-hint">더 자세한 loss 곡선은 MLflow UI에서 — <code>ssh -N -L 5000:127.0.0.1:5000 grib-ai-server</code> 후 <code>localhost:5000</code> (개인 도구라 SSH 터널로만 공개, 공개 페이지에는 미노출)</div>
+    {% endif %}
+
+    {% if s.loop %}
+    <div class="loop-badge">↺ {{ s.loop }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<div class="feedback-loop">
+  ⟲ <strong>참고 — 역방향(재학습) 루프는 두 군데 설계돼 있지만 둘 다 아직 자동화는 안 됐습니다:</strong>
+  ① 3번 내부: 평가 점수가 기준 미달이면 다시 학습으로 돌아감(<code>docs/전략.md</code> 설계도에 있음, 수동 재실행만 가능)
+  ② 6→2/3 방향: Agent가 쌓은 실제 판단 이력을 다시 학습 데이터로 되돌리는 "운영 피드백 루프"(개념 단계, 코드 없음 — 다음 로드맵 확장 후보)
+</div>
+
+<div class="card" style="border-color: var(--llm);">
+  <strong style="color: var(--llm);">남은 과제 (아직 구현 안 됨)</strong>
+  <div class="why">표준적인 MLOps 파이프라인 기준으로 이 프로젝트에 아직 없는 것들 — 있는 척하지 않고 그대로 남겨둡니다.</div>
+  {% for item in remaining_work %}
+  <div class="stat">· {{ item }}</div>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <strong>직접 눌러보기</strong>
+  <div class="why">아래 페이지에서 실제 센서 값을 넣어보면, 이 파이프라인(4~6번)이 실시간으로 어떻게 반응하는지 볼 수 있습니다.</div>
+  <a href="/simulate"><button>엣지 시뮬레이션 열기 →</button></a>
+</div>
+{% endblock %}

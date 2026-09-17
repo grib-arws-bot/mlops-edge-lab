@@ -1,0 +1,111 @@
+"""Agent가 호출하는 도구들. `search_guidelines`만 LLM이 직접 호출 여부·검색어를 판단하고,
+`notify`/`escalate`/`draft_incident_report`는 규칙(`rules.judge`)의 위험도에 따라 코드가
+직접 호출한다 — "누구를 부를지는 LLM이 유연하게, 위험도는 규칙이 고정적으로" 원칙.
+
+지금은 실제 메신저·이메일 연동이 없어서 `notify`/`escalate`는 시뮬레이션(로그만 남김)이다.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import faiss
+from sentence_transformers import SentenceTransformer
+
+from rag.build_index import EMBED_MODEL
+from rag.query import load_meta, retrieve
+
+_ROOT = Path(__file__).resolve().parents[2]
+_INDEX_PATH = _ROOT / "data" / "processed" / "rag_index.faiss"
+
+
+@dataclass
+class ToolContext:
+    """RAG 인덱스·임베딩 모델을 한 번만 로드해서 도구 호출마다 재사용."""
+
+    embed_model: SentenceTransformer
+    index: object
+    meta: list[dict]
+    notify_log: list[dict] = field(default_factory=list)
+
+    @classmethod
+    def load(cls) -> "ToolContext":
+        return cls(
+            embed_model=SentenceTransformer(EMBED_MODEL),
+            index=faiss.read_index(str(_INDEX_PATH)),
+            meta=load_meta(),
+        )
+
+
+def search_guidelines(ctx: ToolContext, query: str, top_k: int = 3) -> list[dict]:
+    """로드맵 5번 RAG 검색을 도구로 노출. LLM이 검색 여부·검색어를 스스로 판단해 호출한다."""
+    hits = retrieve(query, ctx.embed_model, ctx.index, ctx.meta, top_k=top_k)
+    return [{"source": h["source"], "text": h["text"][:300]} for h, score in hits]
+
+
+def notify(ctx: ToolContext, channel: str, message: str) -> dict:
+    """1차 알림 발송(시뮬레이션)."""
+    record = {
+        "type": "notify",
+        "channel": channel,
+        "message": message,
+        "sent_at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    ctx.notify_log.append(record)
+    return {"status": "sent", "channel": channel}
+
+
+def actuate_equipment(ctx: ToolContext, action) -> dict:
+    """저위험 장비 제어 — 규칙이 이미 결정한 것을 그대로 실행(시뮬레이션). LLM 관여 없음."""
+    record = {
+        "type": "actuate",
+        "equipment": action.name,
+        "description": action.description,
+        "status": "실행됨",
+        "at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    ctx.notify_log.append(record)
+    return record
+
+
+def request_equipment_approval(ctx: ToolContext, action) -> dict:
+    """고위험 장비 제어 — 자동 실행하지 않고 사람 승인을 요청만 한다(시뮬레이션). LLM 관여 없음."""
+    record = {
+        "type": "actuate",
+        "equipment": action.name,
+        "description": action.description,
+        "status": "승인 대기",
+        "at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    ctx.notify_log.append(record)
+    return record
+
+
+def escalate(ctx: ToolContext, reason: str) -> dict:
+    """에스컬레이션(시뮬레이션). 위험도가 '위험'일 때 코드가 직접 호출한다(LLM 판단 아님)."""
+    record = {
+        "type": "escalate",
+        "reason": reason,
+        "sent_at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    ctx.notify_log.append(record)
+    return {"status": "escalated"}
+
+
+def draft_incident_report(ctx: ToolContext, event: dict, judgement, narrative: str, guideline_sources: list[str]) -> dict:
+    """사고 리포트 초안. 이미 만든 알림 문장(narrative)을 재사용 — 추가 LLM 호출 없이 조립만 한다."""
+    return {
+        "type": "incident_report_draft",
+        "location": event["location"],
+        "category": event["category"],
+        "substance": event["substance"],
+        "value": event["value"],
+        "threshold": event["threshold"],
+        "severity": judgement.severity.value,
+        "ratio": round(judgement.ratio, 2),
+        "narrative": narrative,
+        "guideline_sources": guideline_sources,
+        "drafted_at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
