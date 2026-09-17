@@ -10,6 +10,10 @@ llama.cpp/
 .dvc/tmp
 .pytest_cache/
 
+# 웹에서 보여주는 교육자료 PDF는 docs/교육자료/*.pptx에서 매번 다시 변환해서 만든다
+# (파이프라인 페이지의 "하드코딩 대신 실제 파일에서 계산" 원칙과 동일) — 커밋 대상 아님.
+src/web/static/
+
 __pycache__/
 *.pyc
 .venv/

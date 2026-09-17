@@ -21,6 +21,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from llama_cpp import Llama
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -35,19 +36,46 @@ _ROOT = Path(__file__).resolve().parents[2]
 _GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
 _F16_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-f16.gguf"
 _HERE = Path(__file__).resolve().parent
+_DECK_PPTX = _ROOT / "docs" / "교육자료" / "MLOps-Edge-Lab_교육자료.pptx"
+_STATIC_DIR = _HERE / "static"
+_DECK_PDF = _STATIC_DIR / "deck.pdf"
+_STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 _state: dict = {}
+
+
+def _ensure_deck_pdf() -> None:
+    """교육자료 PPT를 PDF로 변환해 웹에 그대로 박아 넣는다.
+
+    파일을 미리 변환해서 커밋해두지 않는 이유는 파이프라인 페이지 수치와 같은 원칙 —
+    "화면에 보이는 것은 항상 실제 산출물에서 나온다"를 지키기 위함이다. pptx가 갱신되면
+    (mtime 비교) 다음 서버 기동 때 자동으로 다시 변환된다. LibreOffice(soffice)는 PPT
+    검증 단계에서 이미 서버에 설치돼 있던 걸 재사용.
+    """
+    if not _DECK_PPTX.exists():
+        return
+    if _DECK_PDF.exists() and _DECK_PDF.stat().st_mtime >= _DECK_PPTX.stat().st_mtime:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(
+            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", tmp, str(_DECK_PPTX)],
+            check=True, timeout=120,
+        )
+        produced = next(Path(tmp).glob("*.pdf"))
+        produced.replace(_DECK_PDF)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _state["ctx"] = ToolContext.load()
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
+    _ensure_deck_pdf()
     yield
     _state.clear()
 
 
 app = FastAPI(title="MLOps-Edge-Lab 데모", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_HERE / "templates"))
 
 # 표준 MLOps 갭 중 "운영 모니터링" — Prometheus 클라이언트로 지표를 노출만 하고,
@@ -195,6 +223,11 @@ def _pipeline_stages() -> list[dict]:
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse(request, "index.html", {"stages": _pipeline_stages()})
+
+
+@app.get("/education", response_class=HTMLResponse)
+def education(request: Request):
+    return templates.TemplateResponse(request, "education.html", {"deck_available": _DECK_PDF.exists()})
 
 
 _MAX_SENSORS = 5
