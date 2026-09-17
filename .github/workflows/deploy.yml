@@ -1,0 +1,28 @@
+name: test-and-deploy
+
+# main에 푸시될 때마다: ① GitHub 호스팅 러너에서 순수 규칙 로직 단위 테스트(빠름, 무료,
+# GPU·모델 다운로드 불필요) → ② 통과하면 AI 서버에 등록된 자체 호스팅 러너가 코드를
+#받아 웹 서비스를 재시작한다. ARWS/BidRadar와 달리 이 프로젝트는 dev/prod가 같은 서버
+# 하나라서 stg/prod 2단계 구분 없이 바로 배포한다(docs/의사결정_로그.md 1번 참고).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: pytest tests/ -v
+
+  deploy:
+    needs: test
+    runs-on: [self-hosted, mlops-edge-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/deploy.sh

@@ -8,6 +8,7 @@ llama.cpp/
 *.gguf
 .dvc/cache
 .dvc/tmp
+.pytest_cache/
 
 __pycache__/
 *.pyc
