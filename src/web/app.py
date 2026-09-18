@@ -146,10 +146,15 @@ def _mlflow_finetune_metrics() -> dict | None:
     None을 반환하고, 화면에서는 '측정값 없음'으로 대체한다(조용한 실패 위장 금지 원칙과
     같은 맥락 — 못 가져왔다는 사실 자체는 숨기지 않는다)."""
     try:
+        # MLflow가 죽어있으면 기본 클라이언트는 몇 분씩 재시도하며 요청 자체를 블로킹한다
+        # (실제로 겪음 — 68번 포트 이전 작업 중 MLflow가 내려간 상태로 이 페이지가 응답
+        # 없이 멈춰버림). 짧은 타임아웃을 강제해서 "MLflow 연결 안 됨"으로 빨리 넘어가게 한다.
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "3")
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "1")
         import mlflow
         from mlflow.tracking import MlflowClient
 
-        mlflow.set_tracking_uri("http://127.0.0.1:5000")
+        mlflow.set_tracking_uri("http://127.0.0.1:8082")
         client = MlflowClient()
         exp = client.get_experiment_by_name("sllm-finetune")
         if not exp:

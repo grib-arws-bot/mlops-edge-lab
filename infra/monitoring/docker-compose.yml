@@ -1,16 +1,25 @@
 services:
+  # 이 서버는 다른 프로젝트도 같이 쓰는 공식 서버라, 각 도구의 기본 포트(9090/3000)를
+  # 그대로 쓰면 다른 팀과 충돌할 수 있다 — 이미 확보해둔 웹 서비스 포트(8081/28081)와
+  # 같은 대역(808x/2808x)으로 이 프로젝트 전용 포트를 새로 배정한다(의사결정_로그 68번).
   prometheus:
     image: prom/prometheus:v3.1.0
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     network_mode: host  # 컨테이너에서 localhost:8081(웹 서비스)을 그대로 스크레이핑하기 위함
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+      - --web.listen-address=:8083
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:11.4.0
-    network_mode: host  # Prometheus와 동일한 이유. 3000번 포트도 SSH 터널로만 접근(공개 안 함)
+    network_mode: host  # Prometheus와 동일한 이유
     environment:
-      - GF_SERVER_HTTP_PORT=3001  # 8081과 안 겹치게, Prometheus(9090)와도 안 겹치게
+      - GF_SERVER_HTTP_PORT=8084
     volumes:
       - grafana-data:/var/lib/grafana
     restart: unless-stopped

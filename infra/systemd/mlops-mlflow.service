@@ -1,0 +1,12 @@
+[Unit]
+Description=MLOps-Edge-Lab MLflow tracking server
+After=network.target
+
+[Service]
+WorkingDirectory=%h/mlops-edge-lab
+ExecStart=%h/mlops-edge-lab/.venv/bin/mlflow server --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root %h/mlops-edge-lab/mlflow/artifacts --host 0.0.0.0 --port 8082
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

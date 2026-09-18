@@ -19,7 +19,7 @@
     {% endfor %}
 
     {% if s.mlflow_hint %}
-    <div class="mlflow-hint">더 자세한 loss 곡선은 MLflow UI에서 — <code>ssh -N -L 5000:127.0.0.1:5000 grib-ai-server</code> 후 <code>localhost:5000</code> (개인 도구라 SSH 터널로만 공개, 공개 페이지에는 미노출)</div>
+    <div class="mlflow-hint">더 자세한 loss 곡선은 MLflow UI에서 — <code>http://thingx.grib-iot.com:28082/</code> (외부 포트 개방 대기 중 — 그 전까지는 <code>ssh -N -L 8082:127.0.0.1:8082 grib-ai-server</code> 후 <code>localhost:8082</code>)</div>
     {% endif %}
 
     {% if s.loop %}
