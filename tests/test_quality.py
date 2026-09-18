@@ -20,11 +20,22 @@ def test_empty_text_flagged():
     assert "빈 텍스트" in signals.flags
 
 
-def test_repeated_garbage_lines_flagged():
+def test_short_repeated_lines_flagged():
     text = "\n".join(["오류 오류 오류"] * 20 + ["실제 내용 한 줄"])
     signals = assess(text)
     assert signals.needs_review
     assert any("반복" in f for f in signals.flags)
+
+
+def test_long_document_with_repetition_not_flagged():
+    """실제 738건 코퍼스로 검증(의사결정_로그 72번) — 긴 공식 규정 문서는 조항·표가
+    반복되는 구조라 반복 비율이 80%를 넘어도 정상인 경우가 실제로 있었다. 문서 길이가
+    충분히 길면(여기서는 3000자 이상) 반복 비율만으로 재검토 대상에 넣으면 안 된다."""
+    line = "제3조 안전관리자는 작업 전 위험성평가를 실시하고 결과를 기록해야 한다. "
+    text = "\n".join([line] * 100)  # 반복 비율 매우 높지만 총 3000자를 넘김
+    assert len(text) > 3000
+    signals = assess(text)
+    assert not signals.needs_review
 
 
 def test_low_korean_ratio_flagged():
