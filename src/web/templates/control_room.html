@@ -6,11 +6,16 @@
     <h1>산업안전 통합관제 (시연)</h1>
     <h2 style="margin-bottom:0;">각 현장의 여러 센서를 12초마다 실제 파이프라인(preview·Agent)으로 재계산합니다 — 정상으로 돌아오면 알림은 사라집니다</h2>
   </div>
-  <select id="edge_profile">
-    {% for key, p in edge_profiles.items() %}
-    <option value="{{ key }}">{{ p.label }}</option>
-    {% endfor %}
-  </select>
+  <div style="display:flex; align-items:center; gap:14px;">
+    <label style="display:flex; align-items:center; gap:6px; margin:0; color:var(--muted); font-size:0.85rem; white-space:nowrap;">
+      <input type="checkbox" id="tts_enabled" style="width:auto;"> 새 알림 음성 방송(3회)
+    </label>
+    <select id="edge_profile">
+      {% for key, p in edge_profiles.items() %}
+      <option value="{{ key }}">{{ p.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
 </div>
 
 <div id="site-grid" class="site-grid">
@@ -28,7 +33,28 @@ function escapeHtml(s) {
   return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+// 장비 조치의 "at"은 ISO 전체 문자열("2026-09-17T23:49:47")이라, 센서/LLM 시각과
+// 형식을 맞추려고 시:분:초 부분만 뽑는다.
+function isoTime(s) {
+  if (!s) return '-';
+  const idx = s.indexOf('T');
+  return idx === -1 ? s : s.slice(idx + 1);
+}
+
 let userChangedProfile = false;
+// 사이트별로 "이미 방송한 알림"을 logged_at 기준으로 기억해서, 5초 폴링마다 같은
+// 알림을 계속 다시 읽지 않게 한다(값이 바뀌어 새 알림이 뜰 때만 새로 방송).
+const announcedAt = {};
+
+function announceAlert(site, narrative) {
+  if (!window.speechSynthesis) return;
+  const text = site + ' 알림. ' + narrative;
+  for (let i = 0; i < 3; i++) {
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = 'ko-KR';
+    window.speechSynthesis.speak(utter);
+  }
+}
 
 async function refreshControlRoom() {
   let data;
@@ -68,15 +94,30 @@ async function refreshControlRoom() {
             '<div class="equip-item equip-' + e.status + '"><span class="equip-dot"></span>' + escapeHtml(e.equipment) + '<span class="equip-status">' + escapeHtml(e.status) + '</span></div>'
           ).join('') + '</div>'
         : '';
+      // 단계별 타임스탬프(사용자 요청) — 센서 변경 → 장비 동작 → LLM 안내 완성 순서로.
+      const equipTime = eq.length ? isoTime(eq[0].at) : s.alert.sensor_changed_at;
+      const timelineHtml =
+        '<div class="stat" style="margin: 4px 0 0;">⏱ ' +
+        (s.alert.sensor_changed_at || '-') + ' 감지 → ' +
+        equipTime + ' 장비 동작 → ' +
+        s.alert.logged_at + ' 안내 완성 (+' + (s.alert.elapsed ?? '?') + 's, ' + escapeHtml(s.alert.edge_label || '') + ')' +
+        '</div>';
       alertBox.className = 'site-alert alert-' + s.alert.severity;
       alertBox.innerHTML =
-        '<div class="feed-head"><span class="severity ' + s.alert.severity + '">' + s.alert.severity + '</span> <span class="stat">' + s.alert.logged_at + ' 갱신 · ' + escapeHtml(s.alert.edge_label || '') + ' ' + (s.alert.elapsed ?? '') + '초</span></div>' +
+        '<div class="feed-head"><span class="severity ' + s.alert.severity + '">' + s.alert.severity + '</span></div>' +
         equipHtml +
-        '<div class="feed-narrative">' + escapeHtml(s.alert.narrative) + '</div>';
+        '<div class="feed-narrative">' + escapeHtml(s.alert.narrative) + '</div>' +
+        timelineHtml;
       alertBox.style.display = 'block';
+
+      if (document.getElementById('tts_enabled').checked && announcedAt[s.name] !== s.alert.logged_at) {
+        announceAlert(s.name, s.alert.narrative);
+      }
+      announcedAt[s.name] = s.alert.logged_at;
     } else {
       alertBox.style.display = 'none';
       alertBox.innerHTML = '';
+      delete announcedAt[s.name];
     }
   }
 }

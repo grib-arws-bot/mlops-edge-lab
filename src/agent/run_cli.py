@@ -27,9 +27,12 @@ def main() -> None:
     events_path, output_path = sys.argv[1], sys.argv[2]
     events = json.loads(Path(events_path).read_text(encoding="utf-8"))
     n_threads = int(os.environ.get("AGENT_THREADS", "2"))
+    # 엣지 프로파일의 GPU 유무 축(web/app.py의 EDGE_PROFILES, 의사결정_로그 62번) —
+    # taskset의 CPU 코어 제한과는 무관하게 GPU/PCIe 접근은 그대로 가능해서 같이 걸어도 됨.
+    n_gpu_layers = -1 if os.environ.get("AGENT_GPU") == "1" else 0
 
     ctx = ToolContext.load()
-    llm = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=n_threads, verbose=False)
+    llm = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=n_threads, n_gpu_layers=n_gpu_layers, verbose=False)
 
     results = []
     for event in events:

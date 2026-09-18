@@ -68,10 +68,28 @@ def _ensure_deck_pdf() -> None:
         produced.replace(_DECK_PDF)
 
 
+def _load_gpu_llm_or_disable_gpu_profiles() -> None:
+    """GPU 프로파일(EDGE_PROFILES의 gpu=True 항목)이 실제로 쓸모 있으려면 GPU로
+    오프로드된 모델이 정말 로드돼 있어야 한다. llama-cpp-python이 CUDA 없이 빌드된
+    환경이면 여기서 실패하는데, 그럴 땐 "GPU"라고 표시된 채 몰래 CPU로 도는 걸 막기
+    위해 그 항목들을 EDGE_PROFILES에서 아예 지워버린다 — 선택 목록에 안 뜨면 거짓말할
+    일도 없다."""
+    try:
+        _state["llm_gpu"] = Llama(
+            model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, n_gpu_layers=-1, verbose=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — 기동 로그에 원인을 남기고 GPU 프로파일만 제거
+        print(f"[startup] GPU 모델 로드 실패, GPU 프로파일 비활성화: {exc}")
+        _state["llm_gpu"] = None
+        for key in [k for k, p in EDGE_PROFILES.items() if p.get("gpu")]:
+            del EDGE_PROFILES[key]
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _state["ctx"] = ToolContext.load()
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
+    _load_gpu_llm_or_disable_gpu_profiles()
     _ensure_deck_pdf()
     _init_control_room()
     control_room_task = asyncio.create_task(_control_room_loop())
@@ -101,6 +119,10 @@ METRIC_NARRATE_LATENCY = Histogram("agent_narrate_latency_seconds", "Time to com
 # 캐시를 두 스레드가 동시에 건드리면 꼬임) 락으로 직렬화한다 — 서로 겹치면 그냥 순서대로
 # 기다렸다가 처리된다(둘 다 실패시키는 것보단 나음).
 _llm_lock = threading.Lock()
+# GPU 모델은 별개의 Llama 인스턴스(별도 KV 캐시)라 CPU 모델과는 서로 안 겹쳐도 되지만,
+# GPU 모델 자기 자신끼리는(예: /simulate와 통합관제가 동시에 GPU 프로파일을 고르는 경우)
+# 여전히 직렬화가 필요해서 별도 락을 둔다.
+_llm_gpu_lock = threading.Lock()
 
 
 @app.get("/metrics")
@@ -250,11 +272,20 @@ _ALL_EQUIPMENT = ["환풍기", "가스차단기", "소화설비(대기)", "소�
 # 서버 그대로). 나머지는 로드맵 7번에서 검증한 cgroup 에뮬레이션(의사결정_로그 32번)을
 # 요청 단위로 재사용 — 매번 모델을 새로 불러오는 대신, 실제로 그 코어/메모리 조건에서
 # 돌린 진짜 결과를 보여주기 위해서다(가짜로 숫자만 줄이는 게 아니라).
+#
+# gpu=True 항목은 llama-cpp-python을 CUDA로 재빌드한 뒤(의사결정_로그 62번) 실제
+# n_gpu_layers=-1(전체 오프로드)로 돌린다 — GPU 빌드가 안 된 환경이면 lifespan에서
+# 이 항목들을 통째로 지워서 애초에 선택 목록에 안 뜨게 한다(거짓으로 "GPU"라고 표시된
+# 채 실제로는 CPU로 도는 걸 방지).
 EDGE_PROFILES = {
-    "server": {"label": "서버 기본 (제한 없음)", "cores": None, "mem_gb": None},
-    "2c32g": {"label": "2코어 / 32GB", "cores": 2, "mem_gb": 32},
-    "2c4g": {"label": "2코어 / 4GB", "cores": 2, "mem_gb": 4},
-    "4c8g": {"label": "4코어 / 8GB", "cores": 4, "mem_gb": 8},
+    "server": {"label": "서버 기본 (CPU 전용, 제한 없음)", "cores": None, "mem_gb": None, "gpu": False},
+    "server_gpu": {"label": "서버 기본 (GPU, 제한 없음)", "cores": None, "mem_gb": None, "gpu": True},
+    "2c32g": {"label": "2코어 / 32GB (GPU 없음)", "cores": 2, "mem_gb": 32, "gpu": False},
+    "2c32g_gpu": {"label": "2코어 / 32GB + GPU", "cores": 2, "mem_gb": 32, "gpu": True},
+    "2c4g": {"label": "2코어 / 4GB (GPU 없음)", "cores": 2, "mem_gb": 4, "gpu": False},
+    "2c4g_gpu": {"label": "2코어 / 4GB + GPU", "cores": 2, "mem_gb": 4, "gpu": True},
+    "4c8g": {"label": "4코어 / 8GB (GPU 없음)", "cores": 4, "mem_gb": 8, "gpu": False},
+    "4c8g_gpu": {"label": "4코어 / 8GB + GPU", "cores": 4, "mem_gb": 8, "gpu": True},
 }
 
 _CATEGORY_SUBSTANCES = {cat: [row[0] for row in table] for cat, (table, _action) in CATEGORIES.items()}
@@ -300,19 +331,31 @@ def _aggregate_equipment(results: list[dict]) -> list[dict]:
     return [{"equipment": name, "status": status[name]} for name in _ALL_EQUIPMENT]
 
 
-def _run_events_inprocess(events: list[dict]) -> list[dict]:
+def _run_events_inprocess(events: list[dict], llm) -> list[dict]:
     results = []
     for event in events:
-        r = run_agent(event, _state["ctx"], _state["llm"])
+        r = run_agent(event, _state["ctx"], llm)
         results.append({"event": event, **to_dict(r)})
         _state["ctx"].notify_log.clear()
     return results
 
 
-def _run_events_emulated(events: list[dict], cores: int, mem_gb: int) -> list[dict]:
+def _pick_inprocess_llm(profile: dict):
+    """GPU 프로파일이 선택됐고 GPU 모델이 실제로 로드돼 있으면 그걸, 아니면 항상 있는
+    CPU 모델을 쓴다. EDGE_PROFILES에서 gpu=True 항목은 로드 실패 시 아예 지워지므로
+    (lifespan 참고) 이 폴백은 이론상만 필요하지만 방어적으로 남겨둔다."""
+    if profile.get("gpu") and _state.get("llm_gpu") is not None:
+        return _state["llm_gpu"], _llm_gpu_lock
+    return _state["llm"], _llm_lock
+
+
+def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool) -> list[dict]:
     """엣지 스펙 에뮬레이션 — 별도 프로세스를 systemd-run(cgroup)+taskset으로 감싸서
     실제로 그 코어 수·메모리로 제한된 조건에서 돌린다(로드맵 7번, 의사결정_로그 32번과
-    동일한 방법). 매번 모델을 새로 불러와서 인프로세스보다 느리지만, 숫자가 진짜다."""
+    동일한 방법). 매번 모델을 새로 불러와서 인프로세스보다 느리지만, 숫자가 진짜다.
+    gpu=True면 AGENT_GPU 환경변수로 서브프로세스(agent/run_cli.py)에 전달해서 그
+    안에서 n_gpu_layers=-1로 새로 모델을 띄우게 한다 — taskset의 CPU 코어 제한은
+    GPU/PCIe 접근과 무관해서 같이 걸어도 문제없다."""
     core_list = ",".join(str(i) for i in range(cores))
     python_bin = _ROOT / ".venv" / "bin" / "python"
 
@@ -331,7 +374,7 @@ def _run_events_emulated(events: list[dict], cores: int, mem_gb: int) -> list[di
         ]
         proc = subprocess.run(
             cmd, cwd=str(_ROOT), timeout=180, capture_output=True, text=True,
-            env={**os.environ, "PYTHONPATH": str(_ROOT / "src"), "AGENT_THREADS": str(cores)},
+            env={**os.environ, "PYTHONPATH": str(_ROOT / "src"), "AGENT_THREADS": str(cores), "AGENT_GPU": "1" if gpu else "0"},
         )
         if proc.returncode != 0 or not output_path.exists():
             raise RuntimeError(f"엣지 에뮬레이션 실행 실패(exit {proc.returncode}): {proc.stderr[-1500:]}")
@@ -384,10 +427,11 @@ async def api_narrate(request: Request):
     start = time.perf_counter()
     try:
         if profile["cores"] is None:
-            with _llm_lock:
-                results = _run_events_inprocess(events)
+            llm, lock = _pick_inprocess_llm(profile)
+            with lock:
+                results = _run_events_inprocess(events, llm)
         else:
-            results = _run_events_emulated(events, profile["cores"], profile["mem_gb"])
+            results = _run_events_emulated(events, profile["cores"], profile["mem_gb"], profile.get("gpu", False))
     except Exception as exc:  # noqa: BLE001 — 데모 화면에 원인을 그대로 보여주기 위함
         METRIC_NARRATE_ERRORS.inc()
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -494,17 +538,22 @@ def _run_control_room_narrative(event: dict) -> dict:
     동일한 cgroup 에뮬레이션(_run_events_emulated)을 그대로 재사용한다."""
     profile = EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES["server"])
     if profile["cores"] is None:
-        with _llm_lock:
-            result = run_agent(event, _state["ctx"], _state["llm"])
+        llm, lock = _pick_inprocess_llm(profile)
+        with lock:
+            result = run_agent(event, _state["ctx"], llm)
             _state["ctx"].notify_log.clear()
             return to_dict(result)
-    return _run_events_emulated([event], profile["cores"], profile["mem_gb"])[0]
+    return _run_events_emulated([event], profile["cores"], profile["mem_gb"], profile.get("gpu", False))[0]
 
 
-def _set_site_alert(site: str, substance: str, severity: str, result: dict, elapsed: float) -> None:
+def _set_site_alert(site: str, substance: str, severity: str, result: dict, elapsed: float, sensor_changed_at: str) -> None:
+    """단계별 타임스탬프(사용자 요청, 의사결정_로그 61번)를 전부 남긴다 — 센서 변경 시점은
+    여기서 직접 넘겨받고, 장비 조치 시점은 각 equipment_status 항목이 이미 갖고 있는
+    ISO 'at' 필드에서, LLM 완성 시점은 지금(logged_at)으로 기록한다."""
     _control_room_state[site]["alert"] = {
         "substance": substance, "severity": severity, "narrative": result["narrative"],
         "equipment": result.get("equipment_status", []), "logged_at": _now_hms(),
+        "sensor_changed_at": sensor_changed_at,
         "elapsed": elapsed, "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES["server"])["label"],
     }
 
@@ -532,6 +581,7 @@ async def _control_room_loop() -> None:
             event = _random_event(site, substance)
             preview_result = preview(event)
             severity = preview_result["judgement"]["severity"]
+            sensor_changed_at = _now_hms()
             _update_sensor(site, substance, event, preview_result)
             METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=severity).inc()
 
@@ -539,7 +589,7 @@ async def _control_room_loop() -> None:
                 start = time.perf_counter()
                 result = await loop.run_in_executor(None, _run_control_room_narrative, event)
                 elapsed = round(time.perf_counter() - start, 2)
-                _set_site_alert(site, substance, severity, result, elapsed)
+                _set_site_alert(site, substance, severity, result, elapsed, sensor_changed_at)
             else:
                 _clear_site_alert_if_owner(site, substance)
         except Exception as exc:  # noqa: BLE001 — 백그라운드 루프는 절대 죽으면 안 됨
