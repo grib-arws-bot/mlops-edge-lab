@@ -198,6 +198,26 @@ def _extraction_success_rate() -> str:
     return f"{ok}/{total}건 ({ok / total:.0%})" if total else "0건"
 
 
+def _extraction_quality_note() -> str | None:
+    """"성공 ≠ 정확"(의사결정_로그 13번)을 실제로 메꾸는 부분 — src/extract/check_quality.py가
+    만든 리포트가 있으면 재검토 필요 건수를 그대로 보여준다. 리포트가 없으면 조용히 숨기지
+    않고 "아직 점검 안 함"이라고 명시한다."""
+    path = _ROOT / "data" / "processed" / "quality_report.jsonl"
+    if not path.exists():
+        return "품질 점검 미실행 — src/extract/check_quality.py 실행 필요"
+    total = review = 0
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            total += 1
+            if json.loads(line).get("needs_review"):
+                review += 1
+    if total == 0:
+        return None
+    return f"품질 재검토 필요: {review}/{total}건 ({review / total:.0%}) — 반복 줄·한글 비율·깨진 문자 기준" if review else f"품질 점검 {total}건 — 재검토 필요 없음"
+
+
 def _pipeline_stages() -> list[dict]:
     f16_mb = _file_mb(_F16_PATH)
     q4_mb = _file_mb(_GGUF_PATH)
@@ -229,7 +249,10 @@ def _pipeline_stages() -> list[dict]:
             "definition": "HWP/HWPX/PDF/DOCX/XLSX/이미지/ZIP 등 다형식 문서를 텍스트로 변환",
             "role": "RAG 코퍼스와 향후 학습 데이터의 원천 확보",
             "library": "pymupdf · pyhwp(hwp5txt) · python-docx · openpyxl · Tesseract OCR · LibreOffice(안전망)",
-            "stats": [f"실제 안전문서 처리: {_extraction_success_rate()}", "폴백 사슬 — 실패해도 조용히 넘어가지 않고 이유를 남김"],
+            "stats": [
+                f"실제 안전문서 처리: {_extraction_success_rate()}", "폴백 사슬 — 실패해도 조용히 넘어가지 않고 이유를 남김",
+                *([_extraction_quality_note()] if _extraction_quality_note() else []),
+            ],
         },
         {
             "no": 3, "title": "sLLM 파인튜닝",

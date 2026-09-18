@@ -71,7 +71,7 @@ def main() -> None:
     for method, count in sorted(by_method.items(), key=lambda kv: -kv[1]):
         print(f"  {method:20s} {count}건")
 
-    mlflow.set_tracking_uri("http://127.0.0.1:5000")
+    mlflow.set_tracking_uri("http://127.0.0.1:8082")
     mlflow.set_experiment("data-extraction")
     with mlflow.start_run(run_name="extract-raw"):
         mlflow.log_metric("total_files", total)

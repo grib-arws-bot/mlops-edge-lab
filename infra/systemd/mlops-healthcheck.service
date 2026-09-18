@@ -1,0 +1,7 @@
+[Unit]
+Description=MLOps-Edge-Lab lightweight health check (Alertmanager-lite)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/mlops-edge-lab
+ExecStart=%h/mlops-edge-lab/.venv/bin/python3 scripts/healthcheck_alert.py

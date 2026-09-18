@@ -9,10 +9,23 @@ tmux는 사람이 그 세션에 실수로 키를 잘못 치면(예: `exit`, `Ctr
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp infra/systemd/*.service ~/.config/systemd/user/
+cp infra/systemd/*.service infra/systemd/*.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now mlops-web mlops-mlflow mlops-actions-runner
+systemctl --user enable --now mlops-healthcheck.timer
 ```
+
+## 장애 알림 (Alertmanager-lite)
+
+`mlops-healthcheck.timer`가 2분마다 `scripts/healthcheck_alert.py`를 실행해서 `mlops-web`·
+`mlops-mlflow`·`mlops-actions-runner`의 systemd 상태와 web/MLflow의 HTTP 응답을 확인한다.
+상태가 바뀔 때만(UP↔DOWN) `logs/alerts.log`에 기록한다. `ALERT_WEBHOOK_URL` 환경변수를
+설정하면(예: `systemctl --user set-environment ALERT_WEBHOOK_URL=https://...`) 같은 내용을
+그 웹훅으로도 보낸다 — 채널(Slack/Discord 등)이 정해지면 코드 수정 없이 바로 연결된다.
+
+풀 Prometheus Alertmanager 대신 이 방식을 쓴 이유: MLflow·actions-runner처럼 `/metrics`를
+노출 안 하는 서비스도 systemd 상태로는 바로 확인되고, 별도 컨테이너·설정 문법 없이 지금
+규모에 필요한 만큼만 가볍게 해결된다.
 
 ## 로그 확인 (tmux capture-pane 대신)
 

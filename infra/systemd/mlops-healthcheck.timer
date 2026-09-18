@@ -1,0 +1,10 @@
+[Unit]
+Description=Run mlops-healthcheck every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=mlops-healthcheck.service
+
+[Install]
+WantedBy=timers.target

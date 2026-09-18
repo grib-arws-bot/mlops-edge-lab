@@ -26,7 +26,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _CANONICAL_DIR = _ROOT / "experiments" / "toy-sensor-lora"
 _REGISTERED_MODEL_NAME = "toy-sensor-lora"
 
-os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
 
 THRESHOLD = 0.90
 EPOCH_SCHEDULE = [1, 3, 5]
