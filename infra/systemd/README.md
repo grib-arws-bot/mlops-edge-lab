@@ -21,6 +21,15 @@ journalctl --user -u mlops-web -f
 journalctl --user -u mlops-mlflow -f
 ```
 
+## `mlops-actions-runner`만 `RestartSec=60`인 이유
+
+GitHub Actions 러너를 중단(재시작 포함)하면, GitHub 서버 쪽이 "이 러너의 이전 세션"을 완전히
+해제하는 데 1~2분 정도 걸린다. 다른 서비스처럼 `RestartSec=5`로 두면 systemd가 세션이 채 안
+풀린 상태에서 바로 재연결을 시도해 `A session for this runner already exists`(Conflict)
+에러가 나고, 이게 반복돼서 8~16초마다 재시작되는 루프에 빠진다(실제로 겪음). `RestartSec=60`으로
+늘려서 GitHub 쪽 세션이 풀릴 시간을 주면 깨끗하게 재연결된다 — systemd 자체의 문제가 아니라
+GitHub 브로커의 세션 해제 지연 때문이었다.
+
 ## 재부팅에도 살아남게 하기 (linger)
 
 기본적으로 `systemctl --user` 서비스는 그 유저의 SSH 세션이 전부 끊기면 같이 죽는다(로그아웃 시

@@ -6,7 +6,7 @@ After=network.target
 WorkingDirectory=%h/actions-runner
 ExecStart=%h/actions-runner/run.sh
 Restart=always
-RestartSec=5
+RestartSec=60
 
 [Install]
 WantedBy=default.target
