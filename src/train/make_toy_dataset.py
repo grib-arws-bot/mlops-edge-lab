@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from sensors import CATEGORIES, LOCS  # noqa: E402 — 웹 시뮬레이터(web/app.py)와 정의 공유
+from sensors import CATEGORIES, LOCS, is_lower_is_worse  # noqa: E402 — 웹 시뮬레이터(web/app.py)와 정의 공유
 
 _OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "processed"
 
@@ -38,9 +38,15 @@ def generate(n: int = 60, seed: int = 42) -> list[dict]:
     for i in range(n):
         cat_name, substances, action = rng.choice(_CATEGORIES)
         subst, unit, threshold, (lo, hi) = rng.choice(substances)
-        val = rng.uniform(threshold, hi) if rng.random() < 0.8 else rng.uniform(lo, threshold)
+        # 산소농도처럼 '낮을수록 위험'한 물질(sensors.LOWER_IS_WORSE)은 위험 쪽 값이
+        # threshold보다 낮은 쪽에 있어서, 어느 구간에서 80%를 뽑을지 방향을 뒤집어야 한다.
+        inverted = is_lower_is_worse(subst)
+        if rng.random() < 0.8:
+            val = rng.uniform(lo, threshold) if inverted else rng.uniform(threshold, hi)
+        else:
+            val = rng.uniform(threshold, hi) if inverted else rng.uniform(lo, threshold)
         loc = rng.choice(_LOCS)
-        exceeded = val > threshold
+        exceeded = val < threshold if inverted else val > threshold
 
         user_msg = f"{loc} {cat_name}센서({subst}), 측정값 {_round(val)}{unit}, 임계값 {_round(threshold)}{unit}"
         if exceeded:

@@ -65,8 +65,11 @@ def _extract_tool_calls(content: str) -> list[dict]:
 
 
 def _event_prompt(event: dict, judgement: rules.Judgement) -> str:
+    # 산소농도처럼 "낮을수록 위험"한 물질은 LLM이 방향을 헷갈려 "초과했다"고 잘못 서술할 수
+    # 있어서(수치가 내려갔는데 "초과"라고 하면 반대로 들림), 방향을 프롬프트에 명시해준다.
+    direction = "낮을수록 위험한 지표" if event.get("lower_is_worse") else "높을수록 위험한 지표"
     return (
-        f"{event['location']} {event['category']}센서({event['substance']}), "
+        f"{event['location']} {event['category']}센서({event['substance']}, {direction}), "
         f"측정값 {event['value']}{event['unit']}, 임계값 {event['threshold']}{event['unit']}, "
         f"위험도 판정: {judgement.severity.value}"
     )
@@ -77,7 +80,7 @@ def preview(event: dict) -> dict:
     보여줄 때 쓴다. 장비 상태는 위험도에서 결정론적으로 정해지므로(risk tier만 보면 됨)
     실제로 로그에 남기는 tools.actuate_*를 부르지 않아도 결과가 똑같다 — 그래서 ctx가
     필요 없는 순수 함수다(부작용 없음, 두 번 불러도 안전)."""
-    judgement = rules.judge(event["value"], event["threshold"])
+    judgement = rules.judge(event["value"], event["threshold"], event.get("lower_is_worse", False))
     equipment = []
     if judgement.exceeded:
         for action in rules.required_equipment_actions(event["category"], judgement.severity):
@@ -96,16 +99,22 @@ def preview(event: dict) -> dict:
 def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3) -> dict:
     decisions: list[Decision] = []
 
-    judgement = rules.judge(event["value"], event["threshold"])
+    judgement = rules.judge(event["value"], event["threshold"], event.get("lower_is_worse", False))
     decisions.append(Decision("rule", "judge", {
         "severity": judgement.severity.value, "ratio": round(judgement.ratio, 2),
     }))
 
     if not judgement.exceeded:
-        narrative = (
-            f"{event['location']}의 {event['substance']} 농도는 {event['value']}{event['unit']}로 "
-            f"임계값({event['threshold']}{event['unit']}) 이내입니다. 정상 범위입니다."
-        )
+        if event.get("lower_is_worse"):
+            narrative = (
+                f"{event['location']}의 {event['substance']} 농도는 {event['value']}{event['unit']}로 "
+                f"안전 기준({event['threshold']}{event['unit']} 이상)을 충족합니다. 정상 범위입니다."
+            )
+        else:
+            narrative = (
+                f"{event['location']}의 {event['substance']} 농도는 {event['value']}{event['unit']}로 "
+                f"임계값({event['threshold']}{event['unit']}) 이내입니다. 정상 범위입니다."
+            )
         return {
             "judgement": judgement, "narrative": narrative, "tool_trace": [],
             "notify_log": [], "report": None, "decisions": decisions,

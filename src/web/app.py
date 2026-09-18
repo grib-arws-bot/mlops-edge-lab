@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent import rules
 from agent.run import preview, run_agent, to_dict
 from agent.tools import ToolContext
-from sensors import CATEGORIES, LOCS, SEVERITY_RATIO, substance_lookup
+from sensors import CATEGORIES, LOCS, SEVERITY_RATIO, VALUE_CEILING, is_lower_is_worse, substance_lookup
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
@@ -287,6 +287,10 @@ EDGE_PROFILES = {
     "4c8g": {"label": "4코어 / 8GB (GPU 없음)", "cores": 4, "mem_gb": 8, "gpu": False},
     "4c8g_gpu": {"label": "4코어 / 8GB + GPU", "cores": 4, "mem_gb": 8, "gpu": True},
 }
+# "서버 기본(제한 없음)"은 이 프로젝트의 개발/운영 서버 자체라 실제 엣지 디바이스로서는
+# 비현실적이다(사용자 지적) — 실제 엣지 배포에서 가장 흔한 스펙으로 꼽히는 4코어/8GB급
+# (산업용 미니PC·NUC급)을 기본 선택지로 삼는다.
+_DEFAULT_EDGE_PROFILE = "4c8g"
 
 _CATEGORY_SUBSTANCES = {cat: [row[0] for row in table] for cat, (table, _action) in CATEGORIES.items()}
 _CATEGORY_SUBSTANCES_JSON = json.dumps(_CATEGORY_SUBSTANCES, ensure_ascii=False)
@@ -301,16 +305,31 @@ def _default_location(idx: int) -> str:
     return LOCS[(idx - 1) % len(LOCS)]
 
 
+def _value_for_ratio(substance: str, threshold: float, ratio: float) -> float:
+    """SEVERITY_RATIO(정상/주의/심각 배율)를 실제 측정값으로 바꾼다. 대부분 물질은 '높을수록
+    위험'이라 곱하면 되지만, 산소농도처럼 '낮을수록 위험'한 물질(sensors.LOWER_IS_WORSE)은
+    나누는 방향이어야 방향이 맞다 — 물리적으로 불가능한 값이 안 나오게 상한(VALUE_CEILING)도
+    같이 적용한다(예: 대기 중 산소는 20.9%를 넘을 수 없음)."""
+    if is_lower_is_worse(substance):
+        value = threshold / ratio if ratio else threshold
+        ceiling = VALUE_CEILING.get(substance)
+        if ceiling is not None:
+            value = min(value, ceiling)
+    else:
+        value = threshold * ratio
+    return round(value, 2)
+
+
 def _severity_to_event(category: str, substance: str, severity: str, idx: int) -> dict | None:
     lookup = substance_lookup(category, substance)
     if not lookup:
         return None
     unit, threshold = lookup
     ratio = SEVERITY_RATIO.get(severity, 0.6)
-    value = round(threshold * ratio, 2)
+    value = _value_for_ratio(substance, threshold, ratio)
     return {
         "category": category, "substance": substance, "value": value, "threshold": threshold,
-        "unit": unit, "location": _default_location(idx),
+        "unit": unit, "location": _default_location(idx), "lower_is_worse": is_lower_is_worse(substance),
     }
 
 
@@ -388,6 +407,7 @@ def simulate_form(request: Request):
         {
             "sensors_range": range(1, _MAX_SENSORS + 1), "categories": _CATEGORY_SUBSTANCES,
             "categories_json": _CATEGORY_SUBSTANCES_JSON, "edge_profiles": EDGE_PROFILES,
+            "default_edge_profile": _DEFAULT_EDGE_PROFILE,
         },
     )
 
@@ -417,8 +437,8 @@ async def api_narrate(request: Request):
     추적까지 완성한다. 시간이 걸리는 부분이라 프론트가 이 호출 동안 스톱워치를 보여준다."""
     payload = await request.json()
     events = _events_from_payload(payload.get("sensors", []))
-    profile_key = payload.get("edge_profile", "server")
-    profile = EDGE_PROFILES.get(profile_key, EDGE_PROFILES["server"])
+    profile_key = payload.get("edge_profile", _DEFAULT_EDGE_PROFILE)
+    profile = EDGE_PROFILES.get(profile_key, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])
     METRIC_NARRATE_REQUESTS.labels(edge_profile=profile_key).inc()
 
     if not events:
@@ -481,8 +501,8 @@ async def api_feedback(request: Request):
 _CONTROL_ROOM_SITES = {
     "본관 급식실 조리구역": {"category": "조리흄", "substances": ["일산화탄소", "오일미스트", "포름알데히드"]},
     "본관 급식실 배식구역": {"category": "공기질", "substances": ["CO2", "미세먼지(PM10)", "온도"]},
-    "지하 기계실": {"category": "가스", "substances": ["수소", "헬륨"]},
-    "실험동 가스저장실": {"category": "가스", "substances": ["수소", "아르곤", "질소"]},
+    "지하 기계실": {"category": "가스", "substances": ["수소", "산소(O2)"]},
+    "실험동 가스저장실": {"category": "가스", "substances": ["수소", "산소(O2)"]},
     "2층 사무실": {"category": "공기질", "substances": ["CO2", "TVOC"]},
     "체육관": {"category": "공기질", "substances": ["CO2", "습도"]},
 }
@@ -492,7 +512,7 @@ _control_room_state: dict[str, dict] = {}
 # /simulate와 달리 통합관제는 여러 사람이 같이 보는 "관제실 화면 하나"라는 컨셉이라,
 # 요청마다 프로파일을 넘기는 게 아니라 서버 쪽 전역 설정 하나로 둔다(이 화면을 보는
 # 모두가 같은 조건을 본다) — EDGE_PROFILES는 /simulate와 동일한 것을 재사용.
-_control_room_edge_profile = "server"
+_control_room_edge_profile = _DEFAULT_EDGE_PROFILE
 
 
 def _now_hms() -> str:
@@ -506,8 +526,11 @@ def _random_event(site: str, substance: str) -> dict:
     # 옅어져서 오히려 데모로서 설득력이 떨어진다.
     severity = random.choices(["정상", "주의", "심각"], weights=[55, 30, 15])[0]
     ratio = SEVERITY_RATIO.get(severity, 0.6)
-    value = round(threshold * ratio, 2)
-    return {"category": category, "substance": substance, "value": value, "threshold": threshold, "unit": unit, "location": site}
+    value = _value_for_ratio(substance, threshold, ratio)
+    return {
+        "category": category, "substance": substance, "value": value, "threshold": threshold,
+        "unit": unit, "location": site, "lower_is_worse": is_lower_is_worse(substance),
+    }
 
 
 def _init_control_room() -> None:
@@ -518,7 +541,7 @@ def _init_control_room() -> None:
         for substance in spec["substances"]:
             unit, threshold = substance_lookup(spec["category"], substance)
             sensors[substance] = {
-                "value": round(threshold * SEVERITY_RATIO["정상"], 2), "threshold": threshold,
+                "value": _value_for_ratio(substance, threshold, SEVERITY_RATIO["정상"]), "threshold": threshold,
                 "unit": unit, "severity": "정상", "updated_at": _now_hms(),
             }
         _control_room_state[site] = {"sensors": sensors, "alert": None}
@@ -536,7 +559,7 @@ def _run_control_room_narrative(event: dict) -> dict:
     시간(수 초) 동안 막지 않기 위해 별도 스레드로 뺐다. 선택된 엣지 프로파일이 서버
     기본이면 인프로세스 모델을(_llm_lock으로 /api/narrate와 직렬화), 아니면 /simulate와
     동일한 cgroup 에뮬레이션(_run_events_emulated)을 그대로 재사용한다."""
-    profile = EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES["server"])
+    profile = EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])
     if profile["cores"] is None:
         llm, lock = _pick_inprocess_llm(profile)
         with lock:
@@ -554,7 +577,7 @@ def _set_site_alert(site: str, substance: str, severity: str, result: dict, elap
         "substance": substance, "severity": severity, "narrative": result["narrative"],
         "equipment": result.get("equipment_status", []), "logged_at": _now_hms(),
         "sensor_changed_at": sensor_changed_at,
-        "elapsed": elapsed, "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES["server"])["label"],
+        "elapsed": elapsed, "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])["label"],
     }
 
 
@@ -600,7 +623,10 @@ async def _control_room_loop() -> None:
 def control_room(request: Request):
     return templates.TemplateResponse(
         request, "control_room.html",
-        {"sites": list(_CONTROL_ROOM_SITES.keys()), "edge_profiles": EDGE_PROFILES},
+        {
+            "sites": list(_CONTROL_ROOM_SITES.keys()), "edge_profiles": EDGE_PROFILES,
+            "default_edge_profile": _control_room_edge_profile,
+        },
     )
 
 
@@ -616,7 +642,7 @@ async def set_control_room_edge_profile(request: Request):
     다음 백그라운드 틱부터 전역으로 적용된다(요청 보낸 사람만 바뀌는 게 아님)."""
     global _control_room_edge_profile
     payload = await request.json()
-    key = payload.get("edge_profile", "server")
+    key = payload.get("edge_profile", _DEFAULT_EDGE_PROFILE)
     if key not in EDGE_PROFILES:
         return JSONResponse({"error": "알 수 없는 엣지 프로파일"}, status_code=400)
     _control_room_edge_profile = key

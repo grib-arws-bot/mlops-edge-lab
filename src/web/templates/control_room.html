@@ -12,7 +12,7 @@
     </label>
     <select id="edge_profile">
       {% for key, p in edge_profiles.items() %}
-      <option value="{{ key }}">{{ p.label }}</option>
+      <option value="{{ key }}"{% if key == default_edge_profile %} selected{% endif %}>{{ p.label }}</option>
       {% endfor %}
     </select>
   </div>

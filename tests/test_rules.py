@@ -35,6 +35,25 @@ def test_boundary_exactly_at_threshold_is_normal():
     assert j.severity == Severity.NORMAL
 
 
+def test_lower_is_worse_normal_when_above_threshold():
+    """산소농도처럼 낮을수록 위험한 물질 — 임계값(18%)보다 높으면 정상."""
+    j = judge(value=20.9, threshold=18.0, lower_is_worse=True)
+    assert j.severity == Severity.NORMAL
+    assert not j.exceeded
+
+
+def test_lower_is_worse_danger_when_far_below_threshold():
+    j = judge(value=12.0, threshold=18.0, lower_is_worse=True)  # 18/12 = 1.5배
+    assert j.severity == Severity.DANGER
+    assert j.exceeded
+
+
+def test_lower_is_worse_boundary_exactly_at_threshold_is_normal():
+    j = judge(value=18.0, threshold=18.0, lower_is_worse=True)
+    assert j.severity == Severity.NORMAL
+    assert not j.exceeded
+
+
 def test_high_risk_equipment_never_auto_executes():
     """고위험 장비(가스차단기 등)는 규칙상 자동 실행 목록에 있으면 안 된다 — 항상 승인
     대기여야 한다. 이 테스트가 깨지면 안전 설계 원칙이 깨진 것이다."""

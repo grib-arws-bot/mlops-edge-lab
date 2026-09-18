@@ -28,8 +28,14 @@ class Judgement:
     ratio: float  # 측정값 / 임계값
 
 
-def judge(value: float, threshold: float) -> Judgement:
-    ratio = value / threshold if threshold else float("inf")
+def judge(value: float, threshold: float, lower_is_worse: bool = False) -> Judgement:
+    """lower_is_worse=True면 값이 threshold보다 낮을수록 위험하다고 판정한다(예: 산소농도 —
+    18% 미만이면 산소결핍, sensors.py의 LOWER_IS_WORSE 참고). ratio 계산 방향만 뒤집고
+    1.0/1.5 경계는 그대로 재사용 — 기존 물질(높을수록 위험)과 판정 로직을 통일해서 유지한다."""
+    if lower_is_worse:
+        ratio = threshold / value if value else float("inf")
+    else:
+        ratio = value / threshold if threshold else float("inf")
     if ratio <= 1.0:
         return Judgement(exceeded=False, severity=Severity.NORMAL, ratio=ratio)
     if ratio < 1.5:
