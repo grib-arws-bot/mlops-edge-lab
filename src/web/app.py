@@ -160,8 +160,19 @@ def _mlflow_finetune_metrics() -> dict | None:
         if not exp:
             return None
         runs = client.search_runs([exp.experiment_id], order_by=["start_time DESC"], max_results=20)
-        train_run = next((r for r in runs if r.info.run_name == "toy-sensor-lora"), None)
-        eval_run = next((r for r in runs if r.info.run_name == "toy-sensor-lora-eval"), None)
+        # auto_retrain.py(38번 항목) 도입 이후 run 이름이 "toy-sensor-lora-auto-attemptN"
+        # 식으로 바뀌었는데, 여기는 옛날 고정 이름만 찾고 있어서 최근 20개 run이 전부
+        # auto-attempt 계열이면 항상 None이 되는(= "MLflow 연결 안 됨"으로 잘못 표시되는)
+        # 버그가 있었다 — 실제로는 연결이 멀쩡한데 메시지가 오해를 불렀다. 두 이름 패턴을
+        # 다 인식하도록 수정.
+        def _is_train_run(name: str) -> bool:
+            return name == "toy-sensor-lora" or (name.startswith("toy-sensor-lora-auto-attempt") and not name.endswith("-eval"))
+
+        def _is_eval_run(name: str) -> bool:
+            return name == "toy-sensor-lora-eval" or (name.startswith("toy-sensor-lora-auto-attempt") and name.endswith("-eval"))
+
+        train_run = next((r for r in runs if _is_train_run(r.info.run_name)), None)
+        eval_run = next((r for r in runs if _is_eval_run(r.info.run_name)), None)
         return {
             "train_loss": train_run.data.metrics.get("train_loss") if train_run else None,
             "eval_loss": train_run.data.metrics.get("eval_loss") if train_run else None,
@@ -198,6 +209,10 @@ def _pipeline_stages() -> list[dict]:
             f"MLflow 실측 — train_loss {ft['train_loss']:.3f} · eval_loss {ft['eval_loss']:.3f} · 토큰정확도 {ft['token_acc']:.1%}",
             f"평가 ROUGE-L {ft['rouge_l']:.3f} (합성 데이터 5에폭 과적합 수치 — 품질 지표 아닌 배관 동작 증거)" if ft["rouge_l"] else "평가 run 없음",
         ]
+    elif ft is not None:
+        # 연결은 됐지만 이름이 매칭되는 run이 없는 경우 — "연결 안 됨"이라고 하면 실제
+        # 원인(연결 vs run 부재)을 오해하게 되므로 구분해서 표시한다.
+        ft_stats = ["MLflow 연결됨 — 이름이 일치하는 학습 run을 못 찾음(train/finetune_lora.py 또는 auto_retrain.py 실행 필요)"]
     else:
         ft_stats = ["MLflow 연결 안 됨 — 서버에서 mlflow 프로세스 확인 필요"]
 
