@@ -14,6 +14,14 @@
 from __future__ import annotations
 
 import os
+
+# torch/transformers를 import하기 전에 설정해야 한다 — CUDA 컨텍스트가 한 번 초기화되면
+# 그 뒤에 이 값을 바꿔도 반영이 안 된다. 서버에 GPU가 4장 보이면 HF Trainer가 "여러 GPU가
+# 있으니 DataParallel로 감싸자"고 자동으로 판단해버려서, device_map으로 GPU 1장만
+# 쓰게 고정해도 소용없다(2026-09-19, edu-social-lora 학습 중 NCCL 에러로 실제로 겪음).
+# GPU 자체를 안 보이게 막아야 이 자동 병렬화가 아예 안 걸린다.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
+
 from pathlib import Path
 
 from datasets import load_dataset
@@ -43,7 +51,11 @@ def run_finetune(
     기존 스크립트가 참조하는 고정 경로를 그대로 유지하기 위함. 재시도별로 다른 폴더에
     쓰고 싶으면 output_subdir을 바꿔서 호출한다(auto_retrain.py가 그렇게 함)."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype="bfloat16", device_map="auto")
+    # CUDA_VISIBLE_DEVICES=1(모듈 상단)로 이미 GPU 1장만 보이는 상태라, 여기선 그 한 장
+    # (프로세스 안에서는 인덱스 0으로 재번호됨)에 명시적으로 올린다. "auto"를 쓰면 GPU가
+    # 여러 장일 때 accelerate가 분산 배치하면서 model.forward를 functools.partial로
+    # 감싸버려 trl의 청크 loss 패치가 깨지는 문제가 있었다(2026-09-19 실제로 겪음).
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype="bfloat16", device_map={"": 0})
 
     train_ds = load_dataset("json", data_files=str(_DATA_DIR / train_file), split="train")
     val_ds = load_dataset("json", data_files=str(_DATA_DIR / val_file), split="train")

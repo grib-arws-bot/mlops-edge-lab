@@ -43,24 +43,31 @@ class CharTokenizer:
         return list(text.replace(" ", ""))
 
 
-def load_val_examples() -> list[dict]:
+def load_val_examples(val_path: Path = _VAL_PATH) -> list[dict]:
     # .splitlines()는 쓰지 않는다 — 유니코드 줄경계 문자가 텍스트에 섞이면 오작동한다
     # (src/rag/query.py에서 실제로 겪은 문제, docs/의사결정_로그.md 26번 참고)
-    text = _VAL_PATH.read_text(encoding="utf-8")
+    text = val_path.read_text(encoding="utf-8")
     return [json.loads(line) for line in text.split("\n") if line.strip()]
 
 
-def run_eval(adapter_dir: Path = _ADAPTER_DIR, run_name: str = "toy-sensor-lora-eval") -> float:
+def run_eval(
+    adapter_dir: Path = _ADAPTER_DIR,
+    run_name: str = "toy-sensor-lora-eval",
+    val_path: Path = _VAL_PATH,
+    out_name: str = "eval_toy_sensor.jsonl",
+) -> float:
     """어댑터 하나를 평가해서 평균 ROUGE-L을 반환한다. auto_retrain.py가 이 반환값으로
     "이번 학습이 기준을 통과했는가"를 판단한다 — 그래서 함수로 뺐다(원래는 main()에 다
-    들어있었음)."""
+    들어있었음). val_path/out_name은 도메인별 검증셋을 재사용하려고 뺐다(2026-09-19,
+    edu_social 검증에서 처음 필요해짐) — 기본값은 기존 toy-sensor 경로 그대로라
+    auto_retrain.py 호출부는 안 바뀜."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype="bfloat16", device_map="auto")
     model = PeftModel.from_pretrained(base_model, str(adapter_dir))
     model.eval()
 
     scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=CharTokenizer())
-    examples = load_val_examples()
+    examples = load_val_examples(val_path)
 
     rows = []
     for ex in examples:
@@ -92,7 +99,7 @@ def run_eval(adapter_dir: Path = _ADAPTER_DIR, run_name: str = "toy-sensor-lora-
         print(f"  생성: {r['generated']}")
     print(f"\n평균 ROUGE-L: {avg_rouge:.3f}")
 
-    out_path = _ROOT / "data" / "processed" / "eval_toy_sensor.jsonl"
+    out_path = _ROOT / "data" / "processed" / out_name
     with out_path.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
