@@ -4,6 +4,14 @@
 비교해서 숫자로 남긴다. 지금은 장난감 데이터라 점수 자체는 의미가 크지 않지만, 다음에
 진짜 데이터가 들어왔을 때 같은 스크립트로 "이번 체크포인트가 이전보다 나은가"를 비교할 수
 있어야 한다는 게 핵심이다.
+
+**2026-09-19 수정**: rouge_score 기본 토크나이저가 `[a-z0-9]+` 정규식 기반이라 한글을
+전부 버리고 숫자·영문 단위만 비교한다는 걸 compare_quantization.py 작업 중 발견했다
+(실측: "2층 사무실에서 CO2 농도가 1186ppm..." → ['2','co2','1186ppm',...]). 즉 지금까지
+이 스크립트는 문장이 실제로 달라져도 숫자만 같으면 만점을 주는, 한국어에는 사실상
+무의미한 채점을 auto_retrain.py의 재학습 통과 기준으로 써왔다. CharTokenizer(문자 단위
+분리)로 교체 — 한국어는 조사가 어절에 붙어 공백 기준 단어 분리가 잘 안 맞아서, CJK 언어
+ROUGE 평가에서 흔히 쓰는 방식이다.
 """
 
 from __future__ import annotations
@@ -26,6 +34,15 @@ _VAL_PATH = _ROOT / "data" / "processed" / "toy_sensor_alerts_val.jsonl"
 os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
 
 
+class CharTokenizer:
+    """공백 제거 후 문자 단위로 쪼갠다 — 한국어는 조사가 어절에 붙어서 공백 기준 단어
+    분리로는 "농도가"와 "농도는"이 아예 다른 토큰이 돼버려 LCS가 과소평가된다. 문자
+    단위로 보면 두 표현이 얼마나 겹치는지가 훨씬 정직하게 드러난다."""
+
+    def tokenize(self, text: str) -> list[str]:
+        return list(text.replace(" ", ""))
+
+
 def load_val_examples() -> list[dict]:
     # .splitlines()는 쓰지 않는다 — 유니코드 줄경계 문자가 텍스트에 섞이면 오작동한다
     # (src/rag/query.py에서 실제로 겪은 문제, docs/의사결정_로그.md 26번 참고)
@@ -42,7 +59,7 @@ def run_eval(adapter_dir: Path = _ADAPTER_DIR, run_name: str = "toy-sensor-lora-
     model = PeftModel.from_pretrained(base_model, str(adapter_dir))
     model.eval()
 
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=CharTokenizer())
     examples = load_val_examples()
 
     rows = []

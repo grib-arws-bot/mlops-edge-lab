@@ -6,14 +6,9 @@
 (model-f16.gguf, model-Q4_K_M.gguf)을 똑같이 llama-cpp-python으로 로드해서, "양자화"라는
 변수 하나만 격리해서 비교한다.
 
-정답셋은 evaluate.py와 동일한 것을 재사용하되, 채점 토크나이저는 다르게 한다 —
-rouge_score 기본 토크나이저는 `[a-z0-9]+` 정규식 기반이라 한글을 전부 버리고 숫자·영문
-단위만 남긴다(실측: "2층 사무실에서 CO2 농도가 1186ppm..." → ['2','co2','1186ppm',...]).
-그래서 문장 자체가 달라져도 숫자만 같으면 ROUGE-L이 1.0이 나오는, 한국어에는 사실상
-무의미한 채점이 된다. 이 문제는 evaluate.py(→auto_retrain.py 재학습 게이트)에도 그대로
-있지만 이 스크립트의 스코프가 아니라 별도로 다룬다 — 여기서는 문자 단위 토크나이저로
-직접 교체해서 실제로 한글 차이를 반영하는 채점을 한다(CJK 언어에서 ROUGE를 쓸 때
-일반적인 방식 — 공백 기준 단어 분리가 한국어 조사 결합 특성상 잘 안 맞기 때문).
+정답셋·채점 토크나이저는 evaluate.py와 동일한 것을 재사용한다(evaluate.CharTokenizer —
+rouge_score 기본 토크나이저가 한글을 버리는 결함을 그쪽에서 고쳤고, 여기서도 그대로
+가져다 쓴다. 상세 배경은 evaluate.py 모듈 docstring 참고).
 """
 
 from __future__ import annotations
@@ -26,17 +21,7 @@ import mlflow
 from llama_cpp import Llama
 from rouge_score import rouge_scorer
 
-from train.evaluate import load_val_examples
-
-
-class _CharTokenizer:
-    """공백 제거 후 문자 단위로 쪼갠다 — 한국어는 조사가 어절에 붙어서 공백 기준 단어
-    분리로는 "농도가"와 "농도는"이 아예 다른 토큰이 돼버려 LCS가 과소평가된다. 문자
-    단위로 보면 두 표현이 얼마나 겹치는지가 훨씬 정직하게 드러난다."""
-
-    def tokenize(self, text: str) -> list[str]:
-        return list(text.replace(" ", ""))
-
+from train.evaluate import CharTokenizer, load_val_examples
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MODELS = {
@@ -59,7 +44,7 @@ def _generate(llm: Llama, system_msg: dict, user_msg: dict) -> str:
 
 def run_comparison() -> dict[str, float]:
     examples = load_val_examples()
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=_CharTokenizer())
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=CharTokenizer())
 
     rows = []
     avg_scores: dict[str, float] = {}
