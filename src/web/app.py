@@ -1011,7 +1011,13 @@ async def edu_admin_ask(request: Request):
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 result = json.loads(resp.read())
-            return result["content"][0]["text"]
+            # content[0]이 무조건 text 블록이 아니다 — claude-sonnet-5는 기본적으로
+            # thinking 블록을 먼저 반환하고 그 뒤에 text 블록을 준다(실제로 겪은
+            # KeyError('text')). type으로 걸러서 text 블록만 이어붙인다.
+            text_blocks = [b["text"] for b in result.get("content", []) if b.get("type") == "text"]
+            if not text_blocks:
+                raise RuntimeError(f"응답에 텍스트 블록이 없음: {json.dumps(result, ensure_ascii=False)[:300]}")
+            return "\n".join(text_blocks)
 
         try:
             answer = await loop.run_in_executor(None, _call_claude)

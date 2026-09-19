@@ -59,12 +59,15 @@
     <label>질문</label>
     <input type="text" id="question" placeholder="예: 부산광역시의 인구는 얼마인가요?">
 
-    <div class="ask-buttons" style="display:flex; gap:10px; margin:12px 0; flex-wrap:wrap;">
+    <div class="ask-buttons" style="display:flex; gap:10px; margin:12px 0; flex-wrap:wrap; align-items:center;">
       <button type="button" class="ask-btn" data-mode="rag" {% if not rag_available %}disabled{% endif %}>RAG 실행</button>
       <button type="button" class="ask-btn" data-mode="finetuned" {% if not finetuned_available %}disabled{% endif %}>파인튜닝 실행{% if not finetuned_available %}(어댑터 없음){% endif %}</button>
-      <button type="button" class="ask-btn" data-mode="claude" {% if not claude_available %}disabled{% endif %}>
-        Claude 실행 {% if claude_available %}<span class="tag llm" style="margin-left:4px;">AI비용발생</span>{% else %}(API 키 없음){% endif %}
-      </button>
+      <button type="button" class="ask-btn" data-mode="claude" {% if not claude_available %}disabled{% endif %}>Claude 실행</button>
+      {% if claude_available %}
+      <span class="tag llm">⚠ AI비용발생</span>
+      {% else %}
+      <span class="stat" style="display:inline;">(API 키 없음)</span>
+      {% endif %}
     </div>
 
     <div id="ask-panels" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px;">
