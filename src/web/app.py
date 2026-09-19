@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -1141,11 +1142,19 @@ def bidradar_stats():
     때마다 지워져서 실제로 BidRadar가 접속했던 기록이 1시간 만에 사라진 걸
     사용자가 직접 겪고 지적함. 재시작해도 남아야 한다는 요구로 파일 기반 전환)."""
     call_log = _load_bidradar_call_log()
-    endpoints = ["classify-doc", "classify-topic", "extract-requirements"]
     per_endpoint = {}
-    for ep in endpoints:
+    for ep in _BIDRADAR_ENDPOINT_ORDER:
         calls = [c for c in call_log if c["endpoint"] == ep]
         success = [c for c in calls if c["success"]]
+        # 상단 카드에 "언제부터 며칠째 누적"을 같이 보여준다(사용자 요청, 2026-09-20)
+        # — 누적 총계만 보면 "오늘 갑자기 이만큼 왔다"인지 "여러 날에 걸쳐 쌓였다"인지
+        # 구분이 안 되기 때문.
+        if calls:
+            first_at = min(c["at"] for c in calls)
+            first_date = first_at[:10]
+            days_tracked = (date.today() - date.fromisoformat(first_date)).days + 1
+        else:
+            first_date, days_tracked = None, None
         per_endpoint[ep] = {
             "total": len(calls),
             "success": len(success),
@@ -1153,6 +1162,8 @@ def bidradar_stats():
             "avg_latency_ms": round(sum(c["latency_ms"] for c in success) / len(success)) if success else None,
             "total_tokens_in": sum(c["tokens_in"] for c in calls),
             "total_tokens_out": sum(c["tokens_out"] for c in calls),
+            "first_call_date": first_date,
+            "days_tracked": days_tracked,
         }
     return JSONResponse({
         "endpoints": per_endpoint,
@@ -1831,15 +1842,22 @@ def _load_bidradar_call_log() -> list[dict]:
     return list(reversed(entries))
 
 
+_BIDRADAR_ENDPOINT_ORDER = ["extract-requirements", "classify-topic", "classify-doc"]  # A·B·C 순(9~12절 표기와 통일)
+_BIDRADAR_ENDPOINT_LABEL = {"extract-requirements": "A", "classify-topic": "B", "classify-doc": "C"}
+
+
 def _bidradar_daily_stats(call_log: list[dict]) -> list[dict]:
     """날짜별 호출량 집계(사용자 요청, 2026-09-20 "매일의 기록을 그래프로") — "at"의
-    날짜 부분만 잘라 그룹핑한다."""
+    날짜 부분만 잘라 그룹핑한다. 엔드포인트(A/B/C)별로도 따로 세어서, 그날 어느
+    기능이 얼마나 쓰였는지 구분해서 보여준다(사용자 요청, "일별 호출에는 ABC를
+    각각 표시해줘")."""
     by_date: dict[str, dict] = {}
     for c in call_log:
-        date = c["at"][:10]
-        d = by_date.setdefault(date, {"date": date, "total": 0, "success": 0, "failed": 0})
+        call_date = c["at"][:10]
+        d = by_date.setdefault(call_date, {"date": call_date, "total": 0, **{ep: 0 for ep in _BIDRADAR_ENDPOINT_ORDER}})
         d["total"] += 1
-        d["success" if c["success"] else "failed"] += 1
+        if c["endpoint"] in d:
+            d[c["endpoint"]] += 1
     return sorted(by_date.values(), key=lambda d: d["date"])
 
 

@@ -22,7 +22,7 @@
 <div class="page-header">
   <div>
     <h1>BidRadar 연동</h1>
-    <h2 style="margin-bottom:0;"><span class="live-dot"></span>이 페이지는 에뮬레이션이 아니라, <code>/v1/*</code> 엔드포인트가 실제로 받은 BidRadar 호출 기록입니다(서버 재시작 전까지 유지).</h2>
+    <h2 style="margin-bottom:0;"><span class="live-dot"></span>이 페이지는 에뮬레이션이 아니라, <code>/v1/*</code> 엔드포인트가 실제로 받은 BidRadar 호출 기록입니다(파일에 남아 재시작해도 유지됩니다).</h2>
   </div>
 </div>
 
@@ -30,7 +30,7 @@
 
 <div class="card" style="margin-top:16px;">
   <strong>일별 호출 추이</strong>
-  <div class="why">서버 재시작 전까지 누적된 실제 호출 기록을 날짜별로 집계합니다(최대 300건 보관 — 트래픽이 많은 날엔 과거 날짜가 밀려날 수 있음).</div>
+  <div class="why">재시작해도 유지되는 실제 호출 기록을 날짜별·엔드포인트(A/B/C)별로 집계합니다(최대 2,000건 보관).</div>
   <div id="daily-chart-area" style="margin-top:10px;"></div>
 </div>
 
@@ -46,26 +46,35 @@ function escapeHtml(s) {
 }
 
 const ENDPOINT_LABELS = {
-  "classify-doc": "C · 첨부문서 분류 (/v1/classify-doc)",
-  "classify-topic": "B · 시맨틱 필터 (/v1/classify-topic)",
   "extract-requirements": "A · 요구사항 추출 (/v1/extract-requirements)",
+  "classify-topic": "B · 시맨틱 필터 (/v1/classify-topic)",
+  "classify-doc": "C · 첨부문서 분류 (/v1/classify-doc)",
 };
-const ENDPOINT_ORDER = ["classify-doc", "classify-topic", "extract-requirements"];
+const ENDPOINT_ORDER = ["extract-requirements", "classify-topic", "classify-doc"];
+const ENDPOINT_COLOR = {
+  "extract-requirements": "var(--accent)",
+  "classify-topic": "var(--llm)",
+  "classify-doc": "var(--rule)",
+};
 
 function renderCards(endpoints) {
   const area = document.getElementById('endpoint-cards');
   area.innerHTML = ENDPOINT_ORDER.map(ep => {
-    const s = endpoints[ep] || {total: 0, success: 0, failed: 0, avg_latency_ms: null, total_tokens_in: 0, total_tokens_out: 0};
+    const s = endpoints[ep] || {total: 0, success: 0, failed: 0, avg_latency_ms: null, total_tokens_in: 0, total_tokens_out: 0, first_call_date: null, days_tracked: null};
     const okPct = s.total ? Math.round((s.success / s.total) * 100) : 0;
     const barHtml = s.total
       ? `<div class="bar-row"><div class="bar-track"><div class="bar-ok" style="width:${okPct}%;"></div><div class="bar-fail" style="width:${100-okPct}%;"></div></div></div>`
       : '<div class="stat">아직 호출 기록이 없습니다</div>';
+    const sinceHtml = s.first_call_date
+      ? `<div class="stat">${escapeHtml(s.first_call_date)}부터 ${s.days_tracked}일째 누적</div>`
+      : '';
     return `
       <div class="card endpoint-card">
         <strong>${escapeHtml(ENDPOINT_LABELS[ep])}</strong>
         <div class="big-num">${s.total}<span class="stat" style="display:inline; font-size:0.9rem;"> 건</span></div>
         <div class="stat">성공 ${s.success} · 실패 ${s.failed}</div>
         ${barHtml}
+        ${sinceHtml}
         <div class="stat" style="margin-top:6px;">평균 지연시간: ${s.avg_latency_ms != null ? s.avg_latency_ms + 'ms' : '-'}</div>
         <div class="stat">누적 토큰: 입력 ${s.total_tokens_in} · 출력 ${s.total_tokens_out}</div>
       </div>`;
@@ -87,26 +96,26 @@ function renderDailyChart(daily) {
   let bars = '';
   daily.forEach((d, i) => {
     const x = barGap + i * (barWidth + barGap);
-    const successH = d.success * scale;
-    const failedH = d.failed * scale;
-    const successY = height - padBottom - successH;
-    const failedY = successY - failedH;
-    if (d.success > 0) {
-      bars += `<rect x="${x}" y="${successY}" width="${barWidth}" height="${successH}" fill="var(--normal)" rx="2"></rect>`;
-    }
-    if (d.failed > 0) {
-      bars += `<rect x="${x}" y="${failedY}" width="${barWidth}" height="${failedH}" fill="var(--danger)" rx="2"></rect>`;
-    }
+    // 성공/실패 대신 엔드포인트(A/B/C)별로 쌓는다(사용자 요청, "일별 호출에는
+    // ABC를 각각 표시해줘") — 그날 어느 기능이 얼마나 쓰였는지 보여주는 게
+    // 목적이라 성공/실패 구분은 아래 최근 호출 기록 표에서 이미 확인 가능.
+    let yCursor = height - padBottom;
+    ENDPOINT_ORDER.forEach(ep => {
+      const n = d[ep] || 0;
+      if (n <= 0) return;
+      const h = n * scale;
+      yCursor -= h;
+      bars += `<rect x="${x}" y="${yCursor}" width="${barWidth}" height="${h}" fill="${ENDPOINT_COLOR[ep]}" rx="2"></rect>`;
+    });
     bars += `<text x="${x + barWidth / 2}" y="${height - padBottom + 16}" text-anchor="middle" font-size="11" fill="var(--muted)">${escapeHtml(d.date.slice(5))}</text>`;
-    bars += `<text x="${x + barWidth / 2}" y="${Math.min(successY, failedY, height - padBottom) - 4}" text-anchor="middle" font-size="11" fill="var(--text)">${d.total}</text>`;
+    bars += `<text x="${x + barWidth / 2}" y="${Math.min(yCursor, height - padBottom) - 4}" text-anchor="middle" font-size="11" fill="var(--text)">${d.total}</text>`;
   });
 
   const svgWidth = Math.max(width, barGap + daily.length * (barWidth + barGap));
   area.innerHTML = `
     <svg viewBox="0 0 ${svgWidth} ${height}" style="width:100%; max-width:${svgWidth}px; height:${height}px;">${bars}</svg>
     <div class="daily-chart-legend">
-      <span><span class="sw" style="background:var(--normal);"></span>성공</span>
-      <span><span class="sw" style="background:var(--danger);"></span>실패</span>
+      ${ENDPOINT_ORDER.map(ep => `<span><span class="sw" style="background:${ENDPOINT_COLOR[ep]};"></span>${escapeHtml(ENDPOINT_LABELS[ep].split(' · ')[0])}</span>`).join('')}
     </div>`;
 }
 
