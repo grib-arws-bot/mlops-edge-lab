@@ -408,6 +408,55 @@ def education(request: Request):
     return templates.TemplateResponse(request, "education.html", {"deck_available": _DECK_PDF.exists()})
 
 
+_RAG_GOLDEN_SET_PATH = _ROOT / "data" / "processed" / "rag_golden_set.jsonl"
+_RAG_EVAL_RESULT_PATH = _ROOT / "data" / "processed" / "rag_retrieval_eval_result.jsonl"
+_FINETUNE_COMPARISON_PATH = _ROOT / "data" / "processed" / "finetune_comparison.json"
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    # .splitlines() 대신 .split("\n") — 유니코드 줄구분자 버그(의사결정_로그 27번)와
+    # 동일한 이유로 이 프로젝트 전체에서 지키는 패턴.
+    text = path.read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.split("\n") if line.strip()]
+
+
+def _quality_eval_summary() -> dict:
+    """품질 평가 파일럿(98·99번) 결과를 실제 파일에서 매번 다시 읽어 보여준다 —
+    파이프라인 페이지와 같은 원칙("화면에 보이는 것은 항상 실제 산출물에서 나온다").
+    골든셋 3문항·검증셋 12문항짜리 작은 파일럿이라는 걸 화면에서도 그대로 드러낸다
+    (표본 크기를 숨기지 않음)."""
+    golden_by_q = {r["question"]: r for r in _load_jsonl(_RAG_GOLDEN_SET_PATH)}
+    eval_rows = _load_jsonl(_RAG_EVAL_RESULT_PATH)
+    rag_rows = [
+        {
+            "question": r["question"],
+            "expected_source_id": r["expected_source_id"],
+            "hit": r["hit"],
+            "rank": r.get("rank"),
+            "retrieved_source_ids": r.get("retrieved_source_ids", []),
+            "source_title": golden_by_q.get(r["question"], {}).get("source_title", ""),
+        }
+        for r in eval_rows
+    ]
+    rag_hit_rate = round(sum(r["hit"] for r in rag_rows) / len(rag_rows), 3) if rag_rows else None
+
+    finetune = None
+    if _FINETUNE_COMPARISON_PATH.exists():
+        finetune = json.loads(_FINETUNE_COMPARISON_PATH.read_text(encoding="utf-8"))
+
+    return {
+        "rag_rows": rag_rows, "rag_hit_rate": rag_hit_rate, "rag_n": len(rag_rows),
+        "finetune": finetune,
+    }
+
+
+@app.get("/quality", response_class=HTMLResponse)
+def quality(request: Request):
+    return templates.TemplateResponse(request, "quality.html", _quality_eval_summary())
+
+
 _MAX_SENSORS = 4
 _ALL_EQUIPMENT = ["환풍기", "가스차단기", "소화설비(대기)", "소화설비(방출)"]
 
