@@ -28,6 +28,58 @@
   {% endfor %}
 </div>
 
+<h1 style="margin-top:36px;">수동 시뮬레이션</h1>
+<h2 style="margin-bottom:0;">센서를 직접 골라 켜고 실행하면, 위 라이브 화면과 같은 파이프라인이 그 자리에서 돌아갑니다 — 결과는 최신순으로 기록에 쌓입니다</h2>
+
+<div class="sim-layout">
+<div class="sim-left">
+  <div id="sensor-cards">
+    {% for i in sensors_range %}
+    <div class="card sensor-card compact" data-idx="{{ i }}">
+      <div class="row1">
+        <label class="chk"><input type="checkbox" class="s-enabled" {% if i == 1 %}checked{% endif %}></label>
+        <span class="sensor-label">센서 {{ i }}</span>
+        <select class="cat-select">
+          {% for cat in categories.keys() %}
+          <option value="{{ cat }}" {% if (['가스','조리흄','공기질','가스','조리흄'][i-1]) == cat %}selected{% endif %}>{{ cat }}</option>
+          {% endfor %}
+        </select>
+        <select class="subst-select"></select>
+      </div>
+      <div class="severity-buttons">
+        {% for sev in ['정상', '주의', '심각'] %}
+        <input type="radio" id="s{{ i }}_{{ sev }}" name="s{{ i }}_severity" value="{{ sev }}" {% if sev == '정상' %}checked{% endif %}>
+        <label for="s{{ i }}_{{ sev }}" class="sev-{{ sev }}">{{ sev }}</label>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <button id="run-btn" type="button">시뮬레이션 실행 →</button>
+</div>
+
+<div class="sim-right">
+  <div id="error-box" class="card" style="border-color: var(--danger); display:none;">
+    <strong style="color: var(--danger);">오류</strong><div class="why" id="error-text"></div>
+  </div>
+
+  <div id="equipment-box" class="card" style="display:none;">
+    <strong>① 장비 상태 <span class="tag rule">rule</span></strong>
+    <div class="why">규칙이 위험도만 보고 즉시 켜고 끈 것 — LLM은 여기 관여하지 않습니다.</div>
+    <div class="equipment-grid" id="equipment-grid"></div>
+    <div class="stat" id="timing-line" style="margin-top:10px;"></div>
+  </div>
+
+  <div id="stopwatch" class="stopwatch"></div>
+
+  <div id="results-box" class="card" style="display:none;">
+    <strong>② 실행 기록 — 공간 종합 판정 + LLM 알림 문구</strong>
+    <div class="why">시뮬레이션을 여러 번 돌려본 결과가 최신순으로 쌓입니다. 하나가 실행되는 동안은 다음 실행이 막힙니다(엣지 에뮬레이션이 같은 CPU 코어를 쓰기 때문).</div>
+    <div id="results-list"></div>
+  </div>
+</div>
+</div>
+
 <script>
 function escapeHtml(s) {
   return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -140,6 +192,197 @@ document.getElementById('edge_profile').addEventListener('change', async (e) => 
     // 네트워크 오류는 다음 폴링 때 서버 상태로 다시 맞춰짐
   }
   setTimeout(() => { userChangedProfile = false; }, 8000);
+});
+
+// ── 수동 시뮬레이션(/simulate를 이 페이지로 통합, 2026-09-19) ──────────────
+const categorySubstances = {{ categories_json | safe }};
+
+function populateSubstances(card) {
+  const cat = card.querySelector('.cat-select').value;
+  const substSelect = card.querySelector('.subst-select');
+  substSelect.innerHTML = '';
+  (categorySubstances[cat] || []).forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = name; opt.textContent = name;
+    substSelect.appendChild(opt);
+  });
+}
+document.querySelectorAll('.sensor-card').forEach(card => {
+  card.querySelector('.cat-select').addEventListener('change', () => populateSubstances(card));
+  populateSubstances(card);
+});
+
+function collectSensors() {
+  const sensors = [];
+  document.querySelectorAll('.sensor-card').forEach(card => {
+    if (!card.querySelector('.s-enabled').checked) return;
+    const idx = card.dataset.idx;
+    const severity = card.querySelector(`input[name="s${idx}_severity"]:checked`).value;
+    sensors.push({
+      category: card.querySelector('.cat-select').value,
+      substance: card.querySelector('.subst-select').value,
+      severity: severity,
+    });
+  });
+  return sensors;
+}
+
+function equipClass(status) {
+  if (status === '실행됨') return 'equip-실행됨';
+  if (status === '승인 대기') return 'equip-대기';
+  return 'equip-꺼짐';
+}
+
+function renderEquipment(equipment) {
+  const grid = document.getElementById('equipment-grid');
+  grid.innerHTML = equipment.map(e => `
+    <div class="equip-item ${equipClass(e.status)}">
+      <span class="equip-dot"></span>${e.equipment}
+      <span class="equip-status">${e.status}</span>
+    </div>`).join('');
+  document.getElementById('equipment-box').style.display = 'block';
+}
+
+function runCardHtml(record) {
+  // 활성화된 센서 전부를 한 공간으로 간주해 LLM이 종합 의견 하나만 낸다(복합 센서
+  // 시뮬레이션) — 실행마다 카드를 새로 쌓아서 이전 결과가 사라지지 않고 기록으로
+  // 남는다. 피드백(👍/👎)은 일부러 뺐다 — incorporate_feedback.py가 "이벤트
+  // 하나짜리" 형태를 기대하는데 종합 서술은 그 형태에 안 맞아서, 억지로 끼워
+  // 맞추면 학습 데이터가 왜곡된다. 복합 피드백 형식은 후속 과제로 남겨둔다.
+  const composite = record.composite;
+  const eventsHtml = composite.events.map(e => `
+    <div class="stat">
+      · ${e.event.category}(${e.event.substance}) 측정값 ${e.event.value}${e.event.unit} / 임계값 ${e.event.threshold}${e.event.unit}
+      <span class="severity ${e.judgement.severity}">${e.judgement.severity}</span>
+    </div>`).join('');
+  const equipmentHtml = record.equipment.map(e => `
+    <div class="equip-item ${equipClass(e.status)}">
+      <span class="equip-dot"></span>${e.equipment}
+      <span class="equip-status">${e.status}</span>
+    </div>`).join('');
+
+  return `
+    <div class="sensor-result" data-run-id="${record.id}">
+      <div class="stat" style="margin-bottom:8px;">${record.created_at} · 엣지: ${record.edge_label} · 총 처리시간 ${record.elapsed}초</div>
+      <div class="equipment-grid" style="margin-bottom:10px;">${equipmentHtml}</div>
+      <div>
+        <strong>${composite.location}</strong> — 센서 ${composite.events.length}개 종합 판정
+        <span class="tag rule">rule</span>
+      </div>
+      ${eventsHtml}
+      <p style="margin: 6px 0 4px;">${composite.narrative}</p>
+      <details>
+        <summary>결정 추적 보기</summary>
+        ${composite.decisions.map(d => `
+          <div class="decision-row">
+            <span class="tag ${d.authority}">${d.authority}</span>
+            <strong>${d.action}</strong> — ${Object.entries(d.detail).map(([k,v]) => `${k}: ${v}`).join(', ')}
+          </div>`).join('')}
+      </details>
+      ${composite.report ? `<div class="stat">사고 리포트 초안 생성됨 — 참고 문서: ${(composite.report.guideline_sources||[]).join(', ') || '없음'}</div>` : ''}
+    </div>`;
+}
+
+function renderHistory(history) {
+  const list = document.getElementById('results-list');
+  list.innerHTML = history.map(runCardHtml).join('');
+  document.getElementById('results-box').style.display = history.length ? 'block' : 'none';
+}
+
+function prependRunCard(record) {
+  const list = document.getElementById('results-list');
+  list.insertAdjacentHTML('afterbegin', runCardHtml(record));
+  document.getElementById('results-box').style.display = 'block';
+}
+
+// 페이지를 새로 열거나 새로고침해도 이전 실행 기록이 보이게, 서버가 들고 있는
+// 기록(메모리 — 배포 재시작 전까지 유지)을 불러온다.
+(async () => {
+  try {
+    const res = await fetch('/api/simulate/history');
+    const data = await res.json();
+    renderHistory(data.history || []);
+  } catch (err) {
+    // 기록 로딩 실패는 조용히 넘어간다 — 새 시뮬레이션 실행 자체는 여전히 가능해야 함
+  }
+})();
+
+function showError(msg) {
+  document.getElementById('error-text').textContent = msg;
+  document.getElementById('error-box').style.display = 'block';
+}
+
+// 사내망 프록시가 가끔 요청을 깨뜨리는 게 실제로 관찰돼서(절대경로로 잘못 인코딩됨),
+// 네트워크 오류 시 잠깐 쉬었다가 한두 번 재시도한다. 그래도 안 되면 원인을 그대로 보여준다.
+async function fetchJsonWithRetry(url, options, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch(url, options);
+      const data = await resp.json();
+      return { ok: true, data };
+    } catch (err) {
+      if (attempt === retries) return { ok: false, error: err };
+      await new Promise(r => setTimeout(r, 600));
+    }
+  }
+}
+
+document.getElementById('run-btn').addEventListener('click', async () => {
+  const runBtn = document.getElementById('run-btn');
+  const sensors = collectSensors();
+  document.getElementById('error-box').style.display = 'none';
+
+  if (sensors.length === 0) {
+    showError('최소 1개 센서를 활성화해주세요.');
+    return;
+  }
+
+  // 하나 실행되는 동안 다음 실행을 막는다 — 엣지 에뮬레이션이 같은 CPU 코어를
+  // 고정해서 쓰기 때문에 동시에 돌리면 서로 느려진다. 버튼 비활성화는 같은 탭
+  // 기준 1차 방어고, 서버도 별도로 409를 돌려준다(다른 탭·라이브 루프 대비).
+  runBtn.disabled = true;
+  runBtn.textContent = '실행 중...';
+  try {
+    // ① 즉시 반응: 규칙 기반 판정 + 장비 상태
+    const judgeResult = await fetchJsonWithRetry('/api/judge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors})});
+    if (!judgeResult.ok || !judgeResult.data.equipment) {
+      showError('장비 상태 조회 실패(네트워크 문제일 수 있음): ' + (judgeResult.error || '서버가 예상과 다른 응답을 줬습니다'));
+      return;
+    }
+    renderEquipment(judgeResult.data.equipment);
+
+    // ② LLM 처리: 스톱워치를 보여주며 대기
+    const sw = document.getElementById('stopwatch');
+    const startedAt = performance.now();
+    sw.style.display = 'block';
+    const timer = setInterval(() => {
+      sw.textContent = `⏱ LLM 처리 중... ${((performance.now() - startedAt) / 1000).toFixed(1)}초`;
+    }, 100);
+
+    const edgeProfile = document.getElementById('edge_profile').value;
+    const narrateResult = await fetchJsonWithRetry('/api/narrate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors, edge_profile: edgeProfile})}, 2);
+    clearInterval(timer);
+    sw.style.display = 'none';
+
+    if (!narrateResult.ok) {
+      showError('네트워크 오류로 결과를 못 받았습니다(회사 프록시 문제일 수 있어 재시도했지만 실패): ' + narrateResult.error);
+      return;
+    }
+    const narrateData = narrateResult.data;
+    if (narrateData.error) {
+      showError(narrateData.error);
+      return;
+    }
+    if (!narrateData.composite || !narrateData.equipment) {
+      showError('서버가 예상과 다른 형태로 응답했습니다: ' + JSON.stringify(narrateData).slice(0, 300));
+      return;
+    }
+    renderEquipment(narrateData.equipment);
+    prependRunCard(narrateData);
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = '시뮬레이션 실행 →';
+  }
 });
 </script>
 {% endblock %}

@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from llama_cpp import Llama
@@ -562,16 +562,11 @@ def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool,
         return json.loads(output_path.read_text(encoding="utf-8"))
 
 
-@app.get("/simulate", response_class=HTMLResponse)
-def simulate_form(request: Request):
-    return templates.TemplateResponse(
-        request, "simulate.html",
-        {
-            "sensors_range": range(1, _MAX_SENSORS + 1), "categories": _CATEGORY_SUBSTANCES,
-            "categories_json": _CATEGORY_SUBSTANCES_JSON, "edge_profiles": EDGE_PROFILES,
-            "default_edge_profile": _DEFAULT_EDGE_PROFILE,
-        },
-    )
+@app.get("/simulate")
+def simulate_form():
+    """/simulate를 통합관제 페이지로 합쳤다(2026-09-19, 사용자 요청) — 예전 링크·북마크가
+    깨지지 않게 리다이렉트만 남겨둔다."""
+    return RedirectResponse(url="/control-room")
 
 
 @app.post("/api/judge")
@@ -851,6 +846,10 @@ def control_room(request: Request):
         {
             "sites": list(_CONTROL_ROOM_SITES.keys()), "edge_profiles": EDGE_PROFILES,
             "default_edge_profile": _control_room_edge_profile,
+            # 아래 셋은 /simulate 페이지를 여기로 통합하면서(2026-09-19, 사용자 요청)
+            # 같이 필요해진 것 — 수동 시뮬레이션 섹션의 센서 입력 카드용.
+            "sensors_range": range(1, _MAX_SENSORS + 1), "categories": _CATEGORY_SUBSTANCES,
+            "categories_json": _CATEGORY_SUBSTANCES_JSON,
         },
     )
 
