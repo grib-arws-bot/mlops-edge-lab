@@ -56,7 +56,8 @@
   <div id="stopwatch" class="stopwatch"></div>
 
   <div id="results-box" class="card" style="display:none;">
-    <strong>② 공간 종합 판정 + LLM 알림 문구</strong>
+    <strong>② 실행 기록 — 공간 종합 판정 + LLM 알림 문구</strong>
+    <div class="why">시뮬레이션을 여러 번 돌려본 결과가 최신순으로 쌓입니다. 하나가 실행되는 동안은 다음 실행이 막힙니다(엣지 에뮬레이션이 같은 CPU 코어를 쓰기 때문).</div>
     <div id="results-list"></div>
   </div>
 </div>
@@ -111,22 +112,32 @@ function renderEquipment(equipment) {
   document.getElementById('equipment-box').style.display = 'block';
 }
 
-function renderResults(composite, elapsed, edgeLabel) {
+function runCardHtml(record) {
   // 활성화된 센서 전부를 한 공간으로 간주해 LLM이 종합 의견 하나만 낸다(2026-09-19,
-  // 복합 센서 시뮬레이션) — 그래서 예전처럼 센서마다 카드를 반복하지 않고, 센서별
-  // 판정 목록 + 종합 narrative 하나를 한 카드에 담는다. 피드백(👍/👎)은 일부러 뺐다 —
-  // 이 문장을 학습 데이터로 되돌리는 incorporate_feedback.py가 "이벤트 하나짜리" 형태를
+  // 복합 센서 시뮬레이션) — 그래서 센서마다 카드를 반복하지 않고, 센서별 판정 목록 +
+  // 종합 narrative 하나를 한 카드에 담는다. 실행마다 카드를 새로 쌓아서(같은 요청,
+  // 사용자 지적) 이전 결과가 사라지지 않고 기록으로 남는다 — 그래서 카드 자체에
+  // 그때의 엣지 스펙·장비 상태 스냅샷까지 같이 담는다(나중에 장비 상태가 바뀌어도
+  // 이 카드는 그때 값 그대로 보여야 하므로). 피드백(👍/👎)은 일부러 뺐다 — 이 문장을
+  // 학습 데이터로 되돌리는 incorporate_feedback.py가 "이벤트 하나짜리" 형태를
   // 기대하는데, 종합 서술은 그 형태에 안 맞아서 억지로 끼워 맞추면 학습 데이터가
   // 왜곡된다. 복합 피드백 형식은 별도 설계가 필요한 후속 과제로 남겨둔다.
-  const list = document.getElementById('results-list');
+  const composite = record.composite;
   const eventsHtml = composite.events.map(e => `
     <div class="stat">
       · ${e.event.category}(${e.event.substance}) 측정값 ${e.event.value}${e.event.unit} / 임계값 ${e.event.threshold}${e.event.unit}
       <span class="severity ${e.judgement.severity}">${e.judgement.severity}</span>
     </div>`).join('');
+  const equipmentHtml = record.equipment.map(e => `
+    <div class="equip-item ${equipClass(e.status)}">
+      <span class="equip-dot"></span>${e.equipment}
+      <span class="equip-status">${e.status}</span>
+    </div>`).join('');
 
-  list.innerHTML = `
-    <div class="sensor-result">
+  return `
+    <div class="sensor-result" data-run-id="${record.id}">
+      <div class="stat" style="margin-bottom:8px;">${record.created_at} · 엣지: ${record.edge_label} · 총 처리시간 ${record.elapsed}초</div>
+      <div class="equipment-grid" style="margin-bottom:10px;">${equipmentHtml}</div>
       <div>
         <strong>${composite.location}</strong> — 센서 ${composite.events.length}개 종합 판정
         <span class="tag rule">rule</span>
@@ -143,9 +154,31 @@ function renderResults(composite, elapsed, edgeLabel) {
       </details>
       ${composite.report ? `<div class="stat">사고 리포트 초안 생성됨 — 참고 문서: ${(composite.report.guideline_sources||[]).join(', ') || '없음'}</div>` : ''}
     </div>`;
-  document.getElementById('timing-line').textContent = `엣지 스펙: ${edgeLabel} · 총 처리시간 ${elapsed}초`;
+}
+
+function renderHistory(history) {
+  const list = document.getElementById('results-list');
+  list.innerHTML = history.map(runCardHtml).join('');
+  document.getElementById('results-box').style.display = history.length ? 'block' : 'none';
+}
+
+function prependRunCard(record) {
+  const list = document.getElementById('results-list');
+  list.insertAdjacentHTML('afterbegin', runCardHtml(record));
   document.getElementById('results-box').style.display = 'block';
 }
+
+// 페이지를 새로 열거나 새로고침해도 이전 실행 기록이 보이게, 서버가 들고 있는
+// 기록(메모리 — 배포 재시작 전까지 유지)을 불러온다.
+(async () => {
+  try {
+    const res = await fetch('/api/simulate/history');
+    const data = await res.json();
+    renderHistory(data.history || []);
+  } catch (err) {
+    // 기록 로딩 실패는 조용히 넘어간다 — 새 시뮬레이션 실행 자체는 여전히 가능해야 함
+  }
+})();
 
 function showError(msg) {
   document.getElementById('error-text').textContent = msg;
@@ -168,51 +201,61 @@ async function fetchJsonWithRetry(url, options, retries = 2) {
 }
 
 document.getElementById('run-btn').addEventListener('click', async () => {
+  const runBtn = document.getElementById('run-btn');
   const sensors = collectSensors();
   document.getElementById('error-box').style.display = 'none';
-  document.getElementById('results-box').style.display = 'none';
 
   if (sensors.length === 0) {
     showError('최소 1개 센서를 활성화해주세요.');
     return;
   }
 
-  // ① 즉시 반응: 규칙 기반 판정 + 장비 상태
-  const judgeResult = await fetchJsonWithRetry('/api/judge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors})});
-  if (!judgeResult.ok || !judgeResult.data.equipment) {
-    showError('장비 상태 조회 실패(네트워크 문제일 수 있음): ' + (judgeResult.error || '서버가 예상과 다른 응답을 줬습니다'));
-    return;
-  }
-  renderEquipment(judgeResult.data.equipment);
+  // 하나 실행되는 동안 다음 실행을 막는다(사용자 요청) — 엣지 에뮬레이션이 같은
+  // CPU 코어를 고정해서 쓰기 때문에 동시에 돌리면 서로 느려진다(83번 항목). 버튼
+  // 비활성화는 같은 탭 기준 1차 방어고, 서버도 별도로 409를 돌려준다(다른 탭 대비).
+  runBtn.disabled = true;
+  runBtn.textContent = '실행 중...';
+  try {
+    // ① 즉시 반응: 규칙 기반 판정 + 장비 상태
+    const judgeResult = await fetchJsonWithRetry('/api/judge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors})});
+    if (!judgeResult.ok || !judgeResult.data.equipment) {
+      showError('장비 상태 조회 실패(네트워크 문제일 수 있음): ' + (judgeResult.error || '서버가 예상과 다른 응답을 줬습니다'));
+      return;
+    }
+    renderEquipment(judgeResult.data.equipment);
 
-  // ② LLM 처리: 스톱워치를 보여주며 대기
-  const sw = document.getElementById('stopwatch');
-  const startedAt = performance.now();
-  sw.style.display = 'block';
-  const timer = setInterval(() => {
-    sw.textContent = `⏱ LLM 처리 중... ${((performance.now() - startedAt) / 1000).toFixed(1)}초`;
-  }, 100);
+    // ② LLM 처리: 스톱워치를 보여주며 대기
+    const sw = document.getElementById('stopwatch');
+    const startedAt = performance.now();
+    sw.style.display = 'block';
+    const timer = setInterval(() => {
+      sw.textContent = `⏱ LLM 처리 중... ${((performance.now() - startedAt) / 1000).toFixed(1)}초`;
+    }, 100);
 
-  const edgeProfile = document.getElementById('edge_profile').value;
-  const narrateResult = await fetchJsonWithRetry('/api/narrate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors, edge_profile: edgeProfile})}, 2);
-  clearInterval(timer);
-  sw.style.display = 'none';
+    const edgeProfile = document.getElementById('edge_profile').value;
+    const narrateResult = await fetchJsonWithRetry('/api/narrate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors, edge_profile: edgeProfile})}, 2);
+    clearInterval(timer);
+    sw.style.display = 'none';
 
-  if (!narrateResult.ok) {
-    showError('네트워크 오류로 결과를 못 받았습니다(회사 프록시 문제일 수 있어 재시도했지만 실패): ' + narrateResult.error);
-    return;
+    if (!narrateResult.ok) {
+      showError('네트워크 오류로 결과를 못 받았습니다(회사 프록시 문제일 수 있어 재시도했지만 실패): ' + narrateResult.error);
+      return;
+    }
+    const narrateData = narrateResult.data;
+    if (narrateData.error) {
+      showError(narrateData.error);
+      return;
+    }
+    if (!narrateData.composite || !narrateData.equipment) {
+      showError('서버가 예상과 다른 형태로 응답했습니다: ' + JSON.stringify(narrateData).slice(0, 300));
+      return;
+    }
+    renderEquipment(narrateData.equipment);
+    prependRunCard(narrateData);
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = '시뮬레이션 실행 →';
   }
-  const narrateData = narrateResult.data;
-  if (narrateData.error) {
-    showError(narrateData.error);
-    return;
-  }
-  if (!narrateData.composite || !narrateData.equipment) {
-    showError('서버가 예상과 다른 형태로 응답했습니다: ' + JSON.stringify(narrateData).slice(0, 300));
-    return;
-  }
-  renderEquipment(narrateData.equipment);
-  renderResults(narrateData.composite, narrateData.elapsed, narrateData.edge_label);
 });
 </script>
 {% endblock %}

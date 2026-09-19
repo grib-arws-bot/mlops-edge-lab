@@ -90,6 +90,28 @@ def _load_gpu_llm_or_disable_gpu_profiles() -> None:
             del EDGE_PROFILES[key]
 
 
+def _cleanup_orphaned_edge_scopes() -> None:
+    """서버가 막 기동했다는 건, 이전 프로세스가 추적하던 진행 중 시뮬레이션은 개념적으로
+    전부 끝났어야 한다는 뜻이다 — 그런데 엣지 에뮬레이션은 systemd 스코프로 독립적인
+    생명주기를 가져서(83번 항목, 타임아웃 좀비 문제), 이전 인스턴스가 재시작 직전에
+    막 시작시킨 스코프는 새 서버가 전혀 모른 채로 계속 CPU를 붙잡고 있을 수 있다
+    (2026-09-19, 동시성 테스트 중 실제로 겪음 — 재시작 타이밍과 겹쳐 좀비 2개 발생).
+    기동 시점에 이름 패턴(mlops-edge-emu-*)으로 남아있는 걸 전부 정리해서, 새 인스턴스는
+    항상 깨끗한 상태로 시작하게 한다."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "list-units", "mlops-edge-emu-*.scope", "--no-legend", "--all"],
+            capture_output=True, text=True, timeout=10,
+        )
+        units = [line.split()[0] for line in result.stdout.splitlines() if line.strip()]
+        for unit in units:
+            subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, timeout=10)
+        if units:
+            print(f"[startup] 이전 인스턴스의 좀비 엣지 에뮬레이션 스코프 {len(units)}개 정리: {units}")
+    except Exception as exc:  # noqa: BLE001 — 정리 실패로 서버 기동 자체가 막히면 안 됨
+        print(f"[startup] 좀비 스코프 정리 중 오류(무시하고 계속): {exc}")
+
+
 def _load_edu_rag_or_disable() -> None:
     """교육 RAG 인덱스가 아직 안 만들어졌을 수도 있다(운영 콘솔에서 소스를 새로 고를
     때마다 다시 빌드하는 게 아니라 수동 빌드 스크립트라서) — 없으면 조용히 숨기지 않고
@@ -112,6 +134,7 @@ def _load_edu_rag_or_disable() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _cleanup_orphaned_edge_scopes()
     _state["ctx"] = ToolContext.load()
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
     _load_gpu_llm_or_disable_gpu_profiles()
@@ -478,6 +501,14 @@ def _pick_inprocess_llm(profile: dict):
     return _state["llm"], _llm_lock
 
 
+def _run_inprocess_composite_locked(events: list[dict], profile: dict) -> dict:
+    """threading.Lock 획득 + 추론을 한 덩어리로 executor에 넘기기 위한 래퍼 — lock
+    획득 자체도 블로킹이라 이벤트 루프에서 바로 하면 안 된다(/api/narrate 참고)."""
+    llm, lock = _pick_inprocess_llm(profile)
+    with lock:
+        return _run_events_inprocess_composite(events, llm)
+
+
 def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool, composite: bool = False) -> list[dict] | dict:
     """엣지 스펙 에뮬레이션 — 별도 프로세스를 systemd-run(cgroup)+taskset으로 감싸서
     실제로 그 코어 수·메모리로 제한된 조건에서 돌린다(로드맵 7번, 의사결정_로그 32번과
@@ -562,10 +593,32 @@ async def api_judge(request: Request):
     return JSONResponse({"events": judged, "equipment": equipment})
 
 
+_simulation_history: list[dict] = []
+_simulation_in_progress = False
+_MAX_SIMULATION_HISTORY = 20
+
+
+@app.get("/api/simulate/history")
+def simulate_history():
+    return JSONResponse({"history": _simulation_history})
+
+
 @app.post("/api/narrate")
 async def api_narrate(request: Request):
     """② LLM 처리 단계 — 실제 run_agent()(또는 엣지 에뮬레이션)를 돌려서 알림 문구·결정
-    추적까지 완성한다. 시간이 걸리는 부분이라 프론트가 이 호출 동안 스톱워치를 보여준다."""
+    추적까지 완성한다. 시간이 걸리는 부분이라 프론트가 이 호출 동안 스톱워치를 보여준다.
+
+    **동시 실행 금지(2026-09-19, 사용자 요청)**: 엣지 에뮬레이션은 taskset으로 특정
+    CPU 코어를 고정해서 쓰는데, 두 시뮬레이션이 동시에 돌면 같은 코어를 나눠 쓰면서
+    서로 느려진다(83번 항목에서 실제로 겪은 좀비 프로세스 문제와 같은 종류의 자원
+    경합). 그래서 서버가 전역으로 "지금 하나 돌고 있으면 새 요청은 거절"한다 —
+    프론트에서 버튼을 비활성화하는 것만으로는 다른 탭/사용자가 동시에 누르는 걸
+    못 막아서, 최종 방어선은 서버에 둔다."""
+    global _simulation_in_progress
+
+    if _simulation_in_progress:
+        return JSONResponse({"error": "이미 다른 시뮬레이션이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
+
     payload = await request.json()
     events = _events_from_payload(payload.get("sensors", []))
     profile_key = payload.get("edge_profile", _DEFAULT_EDGE_PROFILE)
@@ -575,30 +628,51 @@ async def api_narrate(request: Request):
     if not events:
         return JSONResponse({"error": "최소 1개 센서를 활성화해주세요."}, status_code=400)
 
+    _simulation_in_progress = True
     start = time.perf_counter()
+    loop = asyncio.get_event_loop()
     try:
         if profile["cores"] is None:
-            llm, lock = _pick_inprocess_llm(profile)
-            with lock:
-                composite_result = _run_events_inprocess_composite(events, llm)
+            # threading.Lock도 동기 블로킹이라, lock 획득까지 통째로 executor 안에서
+            # 해야 한다 — 여기서 바로 `with lock:` 하면 락 대기 자체가 이벤트 루프를
+            # 막아버린다(아래 subprocess 호출과 같은 이유).
+            composite_result = await loop.run_in_executor(None, _run_inprocess_composite_locked, events, profile)
         else:
-            composite_result = _run_events_emulated(
-                events, profile["cores"], profile["mem_gb"], profile.get("gpu", False), composite=True,
+            # run_in_executor로 감싸지 않으면 이 subprocess.run() 호출(최대 180초)이
+            # 이벤트 루프를 통째로 막는다 — 그동안 control-room·edu-admin 등 다른
+            # 페이지도 전부 응답을 못 하게 된다. 2026-09-19 동시 실행 방지 기능을
+            # 테스트하다 실제로 겪음: 두 번째 요청이 409로 거절되는 게 아니라 첫 번째가
+            # 끝날 때까지 그냥 먹통으로 대기하고 있었다.
+            composite_result = await loop.run_in_executor(
+                None, _run_events_emulated, events, profile["cores"], profile["mem_gb"], profile.get("gpu", False), True,
             )
     except Exception as exc:  # noqa: BLE001 — 데모 화면에 원인을 그대로 보여주기 위함
         METRIC_NARRATE_ERRORS.inc()
         return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        _simulation_in_progress = False
     elapsed = round(time.perf_counter() - start, 2)
     METRIC_NARRATE_LATENCY.labels(edge_profile=profile_key).observe(elapsed)
     for e in composite_result.get("equipment_status", []):
         METRIC_EQUIPMENT_ACTUATED.labels(equipment=e["equipment"], status=e["status"]).inc()
 
-    return JSONResponse({
+    # 실행 기록으로 남긴다(사용자 요청) — 여러 번 돌려본 결과를 화면에서 계속 비교해볼
+    # 수 있어야 하는데, 예전엔 매번 결과 패널 하나를 덮어써서 직전 결과가 사라졌다.
+    # 서버 재시작(배포)까지 살아남을 필요는 없다고 판단해 파일이 아니라 메모리에만
+    # 쌓는다 — control-room의 상태와 같은 수준의 "런타임 동안만 유지" 성격.
+    record = {
+        "id": uuid.uuid4().hex[:8],
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "edge_profile": profile_key,
+        "edge_label": profile["label"],
+        "elapsed": elapsed,
         "composite": composite_result,
         "equipment": _aggregate_equipment([composite_result]),
-        "elapsed": elapsed,
-        "edge_label": profile["label"],
-    })
+    }
+    _simulation_history.insert(0, record)
+    del _simulation_history[_MAX_SIMULATION_HISTORY:]
+
+    return JSONResponse(record)
 
 
 @app.post("/api/feedback")
