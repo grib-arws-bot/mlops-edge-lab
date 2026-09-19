@@ -33,7 +33,12 @@ from rag.chunk import chunk_text
 _ROOT = Path(__file__).resolve().parents[2]
 _COLLECTED_DIR = _ROOT / "edu" / "collected"
 _OUT_DIR = _ROOT / "data" / "processed"
-_GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-f16.gguf"
+# 2026-09-19까지는 양자화 안 된 F16(7.5GB) 모델을 CPU 8스레드로 돌렸는데, 청크마다
+# 순차 호출(최대 60회)하다 보니 실측 20분 이상 걸렸다(사용자가 "멈춘 것 같다"고
+# 지적 — 실제로는 멈춘 게 아니라 이 조합이 원래 느렸다). app.py의 인프로세스 모델과
+# 같은 조합(Q4_K_M + GPU 전체 오프로드)으로 바꿔 속도를 맞춘다 — GPU 빌드가 없는
+# 환경이면 n_gpu_layers는 자동으로 CPU 폴백된다(app.py 409번 줄 주석과 동일 원리).
+_GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
 
 _SYSTEM_PROMPT = "당신은 중학교 사회 선생님입니다. 학생 질문에 학생 눈높이로 친절하게 답합니다."
 
@@ -49,11 +54,15 @@ _GEN_INSTRUCTION = """다음은 교육 자료의 한 부분입니다. 이 내용
 """
 
 
-def _load_modifiable_chunks(source_ids: list[str] | None = None) -> list[tuple[str, str]]:
+def _load_modifiable_chunks(source_ids: list[str] | None = None, allow_restricted: bool = False) -> list[tuple[str, str]]:
     """(sub_domain, chunk) 목록 — allows_modification=True인 수집 항목의 청크만.
 
     source_ids를 주면 그 소스들로 제한한다 — 운영 콘솔에서 사용자가 소스를 골라
-    학습에 포함시키는 기능(2026-09-19) 때문에 추가. None이면 기존처럼 전체."""
+    학습에 포함시키는 기능(2026-09-19) 때문에 추가. None이면 기존처럼 전체.
+
+    allow_restricted=True면 allows_modification=False인 항목도 포함한다 — 웹 콘솔의
+    명시적 동의(license_override_ack)를 거쳐서만 여기까지 전달된다(app.py가 검증·
+    로그 기록을 이미 마친 뒤 CLI 플래그로 넘김). 기본값 False는 기존 동작 그대로."""
     chunks: list[tuple[str, str]] = []
     if not _COLLECTED_DIR.exists():
         return chunks
@@ -68,7 +77,7 @@ def _load_modifiable_chunks(source_ids: list[str] | None = None) -> list[tuple[s
             if not line.strip():
                 continue
             item = json.loads(line)
-            if not item.get("allows_modification"):
+            if not item.get("allows_modification") and not allow_restricted:
                 continue
             raw_path = _COLLECTED_DIR / item["raw_path"]
             data = raw_path.read_bytes()
@@ -91,19 +100,23 @@ def _parse_response(text: str) -> tuple[str, str] | None:
     return (question, answer) if question and answer else None
 
 
-def generate(sample_size: int = 60, seed: int = 42, source_ids: list[str] | None = None) -> list[dict]:
-    chunks = _load_modifiable_chunks(source_ids)
+def generate(
+    sample_size: int = 60, seed: int = 42, source_ids: list[str] | None = None,
+    allow_restricted: bool = False, progress_callback=None,
+) -> list[dict]:
+    chunks = _load_modifiable_chunks(source_ids, allow_restricted=allow_restricted)
     if not chunks:
         raise RuntimeError("파인튜닝 가능(allows_modification=True) 수집 데이터가 없음 — src/collect/run.py 먼저 실행 필요")
 
     rng = random.Random(seed)
     sample = rng.sample(chunks, min(sample_size, len(chunks)))
 
-    llm = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
+    llm = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, n_gpu_layers=-1, verbose=False)
 
     examples = []
     skipped = 0
-    for sub_domain, passage in sample:
+    total = len(sample)
+    for i, (sub_domain, passage) in enumerate(sample, start=1):
         result = llm.create_chat_completion(
             messages=[{"role": "user", "content": _GEN_INSTRUCTION.format(passage=passage)}],
             temperature=0.7, max_tokens=400,
@@ -111,16 +124,19 @@ def generate(sample_size: int = 60, seed: int = 42, source_ids: list[str] | None
         parsed = _parse_response(result["choices"][0]["message"]["content"])
         if parsed is None:
             skipped += 1
-            continue
-        question, answer = parsed
-        examples.append({
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-                {"role": "assistant", "content": answer},
-            ],
-            "kind": sub_domain,
-        })
+        else:
+            question, answer = parsed
+            examples.append({
+                "messages": [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": answer},
+                ],
+                "kind": sub_domain,
+            })
+        if progress_callback is not None:
+            # 사용자 지적(2026-09-19) — 진행률이 안 보여서 멈춘 것처럼 보였다.
+            progress_callback(i, total)
 
     print(f"생성 {len(examples)}건, JSON 파싱 실패로 제외 {skipped}건 (후보 청크 {len(chunks)}개 중 {len(sample)}개 샘플링)")
     return examples
@@ -131,11 +147,16 @@ def build_and_save(
     source_ids: list[str] | None = None,
     train_name: str = "edu_social_train.jsonl",
     val_name: str = "edu_social_val.jsonl",
+    allow_restricted: bool = False,
+    progress_callback=None,
 ) -> tuple[int, int]:
     """generate() 결과를 8:2로 나눠 저장하고 (train건수, val건수)를 반환한다.
     운영 콘솔(웹)의 학습 작업(run_edu_training_job.py)이 소스를 골라 호출할 때도
     이 함수를 그대로 쓴다 — CLI(main)와 웹 트리거가 같은 경로를 타야 동작이 갈리지 않는다."""
-    examples = generate(sample_size=sample_size, source_ids=source_ids)
+    examples = generate(
+        sample_size=sample_size, source_ids=source_ids,
+        allow_restricted=allow_restricted, progress_callback=progress_callback,
+    )
     rng = random.Random(7)
     rng.shuffle(examples)
     split = int(len(examples) * 0.8)
