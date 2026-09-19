@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 import random
@@ -30,6 +31,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from llama_cpp import Llama
+import numpy as np
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from sentence_transformers import SentenceTransformer
 
@@ -40,6 +42,7 @@ from agent.tools import ToolContext
 from collect import registry as collect_registry
 from collect.storage import collection_summary
 from rag import query_edu
+from rag.chunk import chunk_text
 from sensors import CATEGORIES, LOCS, SEVERITY_RATIO, VALUE_CEILING, is_lower_is_worse, substance_lookup
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -122,16 +125,19 @@ def _load_edu_rag_or_disable() -> None:
         _state["edu_embed_model"] = None
         _state["edu_index"] = None
         _state["edu_meta"] = None
+        _state["edu_bm25"] = None
         return
     try:
         _state["edu_embed_model"] = SentenceTransformer(query_edu.EMBED_MODEL)
         _state["edu_index"] = query_edu.load_index()
         _state["edu_meta"] = query_edu.load_meta()
+        _state["edu_bm25"] = query_edu.load_bm25()  # 하이브리드 검색(2026-09-19, 88번)
     except Exception as exc:  # noqa: BLE001 — 로드 실패해도 나머지 페이지는 정상 동작해야 함
         print(f"[startup] 교육 RAG 인덱스 로드 실패: {exc}")
         _state["edu_embed_model"] = None
         _state["edu_index"] = None
         _state["edu_meta"] = None
+        _state["edu_bm25"] = None
 
 
 @asynccontextmanager
@@ -393,7 +399,7 @@ def education(request: Request):
     return templates.TemplateResponse(request, "education.html", {"deck_available": _DECK_PDF.exists()})
 
 
-_MAX_SENSORS = 5
+_MAX_SENSORS = 4
 _ALL_EQUIPMENT = ["환풍기", "가스차단기", "소화설비(대기)", "소화설비(방출)"]
 
 # 서버 기본은 이미 로드된 인프로세스 모델을 그대로 써서 빠르다(코어 제한 없음 = 지금
@@ -503,12 +509,27 @@ def _pick_inprocess_llm(profile: dict):
     return _state["llm"], _llm_lock
 
 
+_gpu_llm_busy = False
+
+
 def _run_inprocess_composite_locked(events: list[dict], profile: dict) -> dict:
     """threading.Lock 획득 + 추론을 한 덩어리로 executor에 넘기기 위한 래퍼 — lock
     획득 자체도 블로킹이라 이벤트 루프에서 바로 하면 안 된다(/api/narrate 참고)."""
+    global _gpu_llm_busy
     llm, lock = _pick_inprocess_llm(profile)
+    is_gpu = lock is _llm_gpu_lock
     with lock:
-        return _run_events_inprocess_composite(events, llm)
+        if is_gpu:
+            # AI튜터 쪽 학습/파인튜닝(transformers)이 같은 물리 GPU를 쓰므로, 통합관제가
+            # GPU 프로파일로 추론하는 동안엔 학습 시작을 막는다(사용자 질문 계기,
+            # 2026-09-19) — 반대 방향(학습 중 GPU 추론 시작)은 edu 쪽 학습락이 이미
+            # AI튜터 전체를 막고 있어 이 파일 안에서 한 방향만 추가로 지키면 충분하다.
+            _gpu_llm_busy = True
+        try:
+            return _run_events_inprocess_composite(events, llm)
+        finally:
+            if is_gpu:
+                _gpu_llm_busy = False
 
 
 def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool, composite: bool = False) -> list[dict] | dict:
@@ -593,6 +614,10 @@ async def api_judge(request: Request):
 _simulation_history: list[dict] = []
 _simulation_in_progress = False
 _MAX_SIMULATION_HISTORY = 20
+# 자동(실시간 통합관제 루프)과 수동 시뮬레이션이 서로의 실행 여부를 확인하는 상호
+# 배제 플래그 — 2026-09-19 사용자 요청("자동/수동 둘 중에 하나만 동작"). 하나가 cgroup
+# 코어를 점유 중일 때 다른 하나가 같이 돌면 서로 느려져 타임아웃까지 발생했다.
+_auto_tick_in_progress = False
 
 
 @app.get("/api/simulate/history")
@@ -615,6 +640,11 @@ async def api_narrate(request: Request):
 
     if _simulation_in_progress:
         return JSONResponse({"error": "이미 다른 시뮬레이션이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
+    if _auto_tick_in_progress:
+        # 자동(실시간) 루프가 지금 막 LLM 처리 중이면 cgroup 코어 경합을 피하려고
+        # 수동 실행을 거절한다(2026-09-19 사용자 요청) — 자동 루프는 12초 간격이라
+        # 잠깐 뒤 재시도하면 대부분 바로 통과한다.
+        return JSONResponse({"error": "자동 시뮬레이션이 처리 중입니다. 잠시 후 다시 시도해주세요."}, status_code=409)
 
     payload = await request.json()
     events = _events_from_payload(payload.get("sensors", []))
@@ -716,6 +746,7 @@ _control_room_state: dict[str, dict] = {}
 # 요청마다 프로파일을 넘기는 게 아니라 서버 쪽 전역 설정 하나로 둔다(이 화면을 보는
 # 모두가 같은 조건을 본다) — EDGE_PROFILES는 /simulate와 동일한 것을 재사용.
 _control_room_edge_profile = _DEFAULT_EDGE_PROFILE
+_control_room_auto_enabled = True
 
 
 def _now_hms() -> str:
@@ -762,13 +793,21 @@ def _run_control_room_narrative(event: dict) -> dict:
     시간(수 초) 동안 막지 않기 위해 별도 스레드로 뺐다. 선택된 엣지 프로파일이 서버
     기본이면 인프로세스 모델을(_llm_lock으로 /api/narrate와 직렬화), 아니면 /simulate와
     동일한 cgroup 에뮬레이션(_run_events_emulated)을 그대로 재사용한다."""
+    global _gpu_llm_busy
     profile = EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])
     if profile["cores"] is None:
         llm, lock = _pick_inprocess_llm(profile)
+        is_gpu = lock is _llm_gpu_lock
         with lock:
-            result = run_agent(event, _state["ctx"], llm)
-            _state["ctx"].notify_log.clear()
-            return to_dict(result)
+            if is_gpu:
+                _gpu_llm_busy = True
+            try:
+                result = run_agent(event, _state["ctx"], llm)
+                _state["ctx"].notify_log.clear()
+                return to_dict(result)
+            finally:
+                if is_gpu:
+                    _gpu_llm_busy = False
     return _run_events_emulated([event], profile["cores"], profile["mem_gb"], profile.get("gpu", False))[0]
 
 
@@ -816,6 +855,11 @@ async def _control_room_loop() -> None:
     loop = asyncio.get_event_loop()
     while True:
         await asyncio.sleep(_CONTROL_ROOM_INTERVAL_SECONDS)
+        if not _control_room_auto_enabled:
+            # 사용자가 명시적으로 중지시켰다(2026-09-19 요청) — 상호배제 플래그만으로는
+            # 12초 틱이 계속 재시도해서 수동 시뮬레이션이 반복적으로 거절될 수 있어,
+            # 아예 이번 루프를 완전히 쉬게 하는 명시적 on/off 스위치를 추가했다.
+            continue
         try:
             site = random.choice(list(_CONTROL_ROOM_SITES))
             substance = random.choice(_CONTROL_ROOM_SITES[site]["substances"])
@@ -827,13 +871,24 @@ async def _control_room_loop() -> None:
             METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=severity).inc()
 
             if severity != "정상":
+                # 수동 시뮬레이션이 지금 CPU 코어를 점유 중이면 이번 틱은 건너뛴다
+                # (사용자 요청, 2026-09-19) — 자동 루프와 수동 시뮬레이션이 같은 cgroup
+                # 코어를 동시에 쓰면 서로 느려져 수동 쪽이 타임아웃까지 걸렸다. 12초
+                # 뒤 다음 틱에서 다시 시도하면 되므로 이번 틱은 조용히 넘어간다.
+                if _simulation_in_progress:
+                    continue
                 # 규칙(장비 조치)은 즉시 보여주고, LLM 문구는 나중에 채운다(사용자 요청,
                 # /simulate의 단계별 표시와 동일한 원칙 — "판정은 즉시, LLM은 나중"이라는
                 # 이 프로젝트 전체의 설계를 카드 화면에서도 실제로 보이게 함).
                 _set_site_alert_pending(site, substance, severity, preview_result["equipment_status"], sensor_changed_at)
-                start = time.perf_counter()
-                result = await loop.run_in_executor(None, _run_control_room_narrative, event)
-                elapsed = round(time.perf_counter() - start, 2)
+                global _auto_tick_in_progress
+                _auto_tick_in_progress = True
+                try:
+                    start = time.perf_counter()
+                    result = await loop.run_in_executor(None, _run_control_room_narrative, event)
+                    elapsed = round(time.perf_counter() - start, 2)
+                finally:
+                    _auto_tick_in_progress = False
                 _set_site_alert(site, substance, severity, result, elapsed, sensor_changed_at)
             else:
                 _clear_site_alert_if_owner(site, substance)
@@ -859,7 +914,19 @@ def control_room(request: Request):
 @app.get("/api/control-room/status")
 def control_room_status():
     sites = [{"name": name, **_control_room_state.get(name, {})} for name in _CONTROL_ROOM_SITES]
-    return JSONResponse({"sites": sites, "edge_profile": _control_room_edge_profile})
+    return JSONResponse({"sites": sites, "edge_profile": _control_room_edge_profile, "auto_enabled": _control_room_auto_enabled})
+
+
+@app.post("/api/control-room/auto-toggle")
+async def toggle_control_room_auto(request: Request):
+    """자동(실시간) 시뮬레이션 중지/재개 — 사용자 요청(2026-09-19): 상호배제 플래그만
+    으로는 12초 틱이 계속 재시도해서 수동 시뮬레이션이 반복 거절될 수 있어, 아예 루프를
+    쉬게 하는 명시적 스위치를 추가했다. 관제실 화면과 같은 "여러 사람이 보는 하나의
+    화면" 성격이라 전역으로 적용한다(edge-profile과 동일한 설계)."""
+    global _control_room_auto_enabled
+    payload = await request.json()
+    _control_room_auto_enabled = bool(payload.get("enabled", True))
+    return JSONResponse({"status": "ok", "auto_enabled": _control_room_auto_enabled})
 
 
 @app.post("/api/control-room/edge-profile")
@@ -894,11 +961,39 @@ def _edu_job_status() -> dict:
         return {"status": "idle"}
 
 
+_DEFAULT_SCHOOL_LEVEL = "중학교"
+_DEFAULT_SUBJECT = "사회"
+
+
+def _registry_school_levels() -> list[str]:
+    levels: list[str] = []
+    for cfg in collect_registry.SOURCES:
+        for lv in cfg.school_levels:
+            if lv not in levels:
+                levels.append(lv)
+    return levels
+
+
+def _registry_subjects() -> list[str]:
+    subjects: list[str] = []
+    for cfg in collect_registry.SOURCES:
+        for subj in cfg.subjects:
+            if subj not in subjects:
+                subjects.append(subj)
+    return subjects
+
+
 @app.get("/edu-admin", response_class=HTMLResponse)
-def edu_admin(request: Request):
+def edu_admin(request: Request, school_level: str = _DEFAULT_SCHOOL_LEVEL, subject: str = _DEFAULT_SUBJECT):
+    # 학교급·과목 선택(사용자 요청, 2026-09-19) — registry에 등록된 값만 옵션으로
+    # 보여준다(존재하지 않는 조합을 지어내지 않기 위함). 지금은 중학교/사회만 실제
+    # 수집된 데이터가 있고 나머지는 "등록은 됐지만 소스 미구현"으로 정직하게 0건 표시.
+    matched = collect_registry.sources_for(school_level, subject)
+    matched_ids = {cfg.source_id for cfg in matched}
+
     summary_by_source = {s["source_id"]: s for s in collection_summary()}
     sources = []
-    for config in collect_registry.SOURCES:
+    for config in matched:
         collected = summary_by_source.get(config.source_id)
         sources.append({
             "source_id": config.source_id,
@@ -912,11 +1007,19 @@ def edu_admin(request: Request):
             "last_collected_at": collected["last_collected_at"] if collected else None,
         })
 
+    rag_available = _state.get("edu_index") is not None and any(
+        summary_by_source.get(sid, {}).get("item_count", 0) > 0 for sid in matched_ids
+    )
+
     return templates.TemplateResponse(
         request, "edu_admin.html",
         {
             "sources": sources,
-            "rag_available": _state.get("edu_index") is not None,
+            "school_levels": _registry_school_levels(),
+            "subjects": _registry_subjects(),
+            "selected_school_level": school_level,
+            "selected_subject": subject,
+            "rag_available": rag_available,
             "finetuned_available": (_ROOT / "experiments" / "edu-social-lora" / "final").exists(),
             "claude_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
         },
@@ -928,40 +1031,110 @@ def edu_admin_status():
     return JSONResponse(_edu_job_status())
 
 
+@app.get("/ai-debate", response_class=HTMLResponse)
+def ai_debate(request: Request):
+    return templates.TemplateResponse(
+        request, "ai_debate.html",
+        {
+            "school_levels": _registry_school_levels(),
+            "subjects": _registry_subjects(),
+            "selected_school_level": _DEFAULT_SCHOOL_LEVEL,
+            "selected_subject": _DEFAULT_SUBJECT,
+            "rag_available": _state.get("edu_index") is not None,
+        },
+    )
+
+
+@app.get("/bidradar", response_class=HTMLResponse)
+def bidradar_page(request: Request):
+    return templates.TemplateResponse(request, "bidradar.html", {})
+
+
+@app.get("/api/bidradar/stats")
+def bidradar_stats():
+    """실제 BidRadar 호출 기록 집계 — 시뮬레이션이 아니라 /v1/* 엔드포인트가 실제로
+    받은 요청만 반영한다(사용자 요청, 2026-09-20). 서버 재시작 전까지만 유지되는
+    런타임 메모리 기록이라(control-room 패턴과 동일), 배포 후엔 초기화된다."""
+    endpoints = ["classify-doc", "classify-topic", "extract-requirements"]
+    per_endpoint = {}
+    for ep in endpoints:
+        calls = [c for c in _bidradar_call_log if c["endpoint"] == ep]
+        success = [c for c in calls if c["success"]]
+        per_endpoint[ep] = {
+            "total": len(calls),
+            "success": len(success),
+            "failed": len(calls) - len(success),
+            "avg_latency_ms": round(sum(c["latency_ms"] for c in success) / len(success)) if success else None,
+            "total_tokens_in": sum(c["tokens_in"] for c in calls),
+            "total_tokens_out": sum(c["tokens_out"] for c in calls),
+        }
+    return JSONResponse({
+        "endpoints": per_endpoint,
+        "recent": _bidradar_call_log[:50],
+        "total_calls": len(_bidradar_call_log),
+    })
+
+
+_LICENSE_OVERRIDE_LOG = _ROOT / "logs" / "license_overrides.log"
+
+
 @app.post("/api/edu-admin/train")
 async def edu_admin_train(request: Request):
     payload = await request.json()
     selected = payload.get("sources", [])
+    license_override_ack = bool(payload.get("license_override_ack"))
     if not selected:
         return JSONResponse({"error": "소스를 하나 이상 선택하세요"}, status_code=400)
 
     summary_by_source = {s["source_id"]: s for s in collection_summary()}
-    blocked = [
+    restricted = [
         sid for sid in selected
         if not summary_by_source.get(sid, {}).get("allows_modification")
     ]
-    if blocked:
-        # UI에서 이미 막지만, 라이선스 위반 방지는 서버가 최종 책임진다 —
-        # 체크박스 disabled는 클라이언트에서 얼마든지 우회 가능하기 때문.
+    if restricted and not license_override_ack:
+        # 라이선스 위반 방지는 서버가 최종 책임진다 — 체크박스는 클라이언트에서
+        # 얼마든지 우회 가능하기 때문에, "동의했다는 플래그"까지 서버가 재확인한다.
         return JSONResponse(
-            {"error": f"파인튜닝에 쓸 수 없는 소스(라이선스상 변경 금지): {', '.join(blocked)}"},
+            {"error": f"파인튜닝에 쓸 수 없는 소스(라이선스상 변경 금지): {', '.join(restricted)} — 동의 없이는 진행할 수 없습니다"},
             status_code=400,
         )
+    if restricted:
+        # 사용자 요청으로 2026-09-19부터 명시적 동의하에 허용(의사결정_로그 참고) —
+        # 라이선스 위반 소지가 있는 선택이라 별도 로그에 남겨서 나중에 추적 가능하게 한다.
+        _LICENSE_OVERRIDE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _LICENSE_OVERRIDE_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "logged_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "restricted_sources": restricted, "all_sources": selected,
+            }, ensure_ascii=False) + "\n")
 
     current = _edu_job_status()
     if current.get("status") == "running":
         return JSONResponse({"error": "이미 학습이 진행 중입니다"}, status_code=409)
+    if _gpu_llm_busy:
+        # 통합관제가 GPU 프로파일로 추론 중이면 학습을 시작하지 않는다(사용자 질문
+        # 계기, 2026-09-19) — 둘 다 같은 물리 GPU를 쓰는 transformers/llama.cpp
+        # 프로세스라 동시에 돌면 자원을 다툰다.
+        return JSONResponse({"error": "통합관제가 GPU로 추론 중입니다. 잠시 후 다시 시도해주세요."}, status_code=409)
 
     # 그냥 subprocess.Popen만 쓰면 systemd가 mlops-web 서비스를 cgroup째로 관리하기
     # 때문에, 배포 중 `systemctl restart mlops-web`이 뜨면 이 자식 프로세스도 같이
     # 죽는다(2026-09-19 실제로 겪음 — 학습 도중 다른 기능을 배포했더니 학습이 조용히
     # 죽어있었음). systemd-run --scope로 별도 스코프에 띄우면 mlops-web과 생명주기가
     # 분리돼 배포가 학습을 방해하지 않는다(엣지 에뮬레이션에 쓰던 패턴과 동일).
+    train_cmd = [
+        "systemd-run", "--user", "--scope", "--quiet", "--",
+        str(_EDU_PYTHON_BIN), "-m", "train.run_edu_training_job", "--sources", ",".join(selected),
+    ]
+    if restricted:
+        # 동의(license_override_ack)를 실제 데이터 생성 단계까지 전달한다(2026-09-19) —
+        # make_edu_dataset.py가 allows_modification을 항목 단위로 다시 검사하는 별도
+        # 안전장치를 갖고 있어서(라이선스 강제 지점, 79번), 이 플래그 없이는 웹에서
+        # 동의해도 실제로는 계속 조용히 제외되고 있었다(사용자가 실측으로 발견).
+        train_cmd.append("--allow-restricted")
+
     subprocess.Popen(
-        [
-            "systemd-run", "--user", "--scope", "--quiet", "--",
-            str(_EDU_PYTHON_BIN), "-m", "train.run_edu_training_job", "--sources", ",".join(selected),
-        ],
+        train_cmd,
         cwd=str(_ROOT),
         env={**os.environ, "PYTHONPATH": str(_ROOT / "src")},
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -977,32 +1150,60 @@ async def edu_admin_ask(request: Request):
     payload = await request.json()
     question = (payload.get("question") or "").strip()
     mode = payload.get("mode", "rag")
+    school_level = payload.get("school_level", _DEFAULT_SCHOOL_LEVEL)
+    subject = payload.get("subject", _DEFAULT_SUBJECT)
     if not question:
         return JSONResponse({"error": "질문을 입력하세요"}, status_code=400)
+
+    # 학습 중에는 AI 튜터를 막는다(사용자 요청, 2026-09-19) — 파인튜닝 실행은 GPU를
+    # 학습 프로세스와 다투고, RAG/Claude도 지금 학습 중인 데이터로 답하면 "학습 전
+    # 상태인지 후 상태인지" 혼란스러워서 전체를 잠근다.
+    if _edu_job_status().get("status") == "running":
+        return JSONResponse({"error": "학습이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
 
     loop = asyncio.get_event_loop()
 
     if mode == "rag":
         if _state.get("edu_index") is None:
             return JSONResponse({"error": "RAG 인덱스가 없습니다 — rag/build_edu_index.py 먼저 실행 필요"}, status_code=400)
-        result = await loop.run_in_executor(
-            None, query_edu.answer, question, _state["edu_embed_model"], _state["edu_index"], _state["edu_meta"], _state["llm"],
-        )
-        return JSONResponse({"mode": "rag", **result})
+        allowed_source_ids = {cfg.source_id for cfg in collect_registry.sources_for(school_level, subject)}
+
+        def _run_rag():
+            # _state["llm"]은 산업안전 통합관제(_control_room_loop)와 공유하는 동일한
+            # in-process Llama 인스턴스다 — 락 없이 부르면 백그라운드 루프의 12초 틱과
+            # 동시에 같은 llama.cpp 컨텍스트에서 create_chat_completion이 겹쳐 호출될 수
+            # 있고, 실제로 이게 SIGSEGV로 서버를 죽인 원인이었다(2026-09-19). 통합관제
+            # 쪽은 이미 _llm_lock으로 직렬화하고 있었는데, 이 경로에만 빠져 있었다.
+            with _llm_lock:
+                return query_edu.answer(
+                    question, _state["edu_embed_model"], _state["edu_index"],
+                    _state["edu_meta"], _state["edu_bm25"], _state["llm"],
+                    allowed_source_ids=allowed_source_ids,
+                )
+
+        start = time.perf_counter()
+        result = await loop.run_in_executor(None, _run_rag)
+        elapsed = round(time.perf_counter() - start, 2)
+        return JSONResponse({"mode": "rag", "elapsed": elapsed, **result})
 
     if mode == "claude":
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             return JSONResponse({"error": "ANTHROPIC_API_KEY가 서버에 설정되지 않았습니다"}, status_code=400)
 
-        def _call_claude() -> str:
+        def _call_claude() -> dict:
             # RAG·근거 없이 Claude 자체 지식으로만 답하게 한다 — "우리 파이프라인(RAG/
             # 파인튜닝) 없이 그냥 강력한 범용 모델에 물어보면 어떤가"를 비교하기 위한
             # 대조군이라, 일부러 근거 자료를 안 준다.
             body = json.dumps({
                 "model": "claude-sonnet-5",
-                "max_tokens": 400,
-                "system": "당신은 중학교 사회 선생님입니다. 학생 질문에 학생 눈높이로 친절하게 답합니다.",
+                # 화면에서 답변을 textContent로 그대로 넣기 때문에(마크다운 렌더러 없음),
+                # 이모지·제목(#)·표 같은 서식을 쓰면 기호가 그대로 깨져 보인다(2026-09-19
+                # 사용자 지적) — 평문 문장만 쓰도록 명시. 서식에 토큰을 안 쓰게 되면서
+                # max_tokens도 400→600으로 올림(비교 질문에서 문장 중간에 잘리는 문제
+                # 동시 발견·수정, 2026-09-19).
+                "max_tokens": 600,
+                "system": "당신은 중학교 사회 선생님입니다. 학생 질문에 학생 눈높이로 친절하게 답합니다. 이모지나 마크다운 서식(#, *, - 목록, 표 등) 없이 평범한 문장으로만 답하세요.",
                 "messages": [{"role": "user", "content": question}],
             }).encode("utf-8")
             req = urllib.request.Request(
@@ -1017,21 +1218,45 @@ async def edu_admin_ask(request: Request):
             text_blocks = [b["text"] for b in result.get("content", []) if b.get("type") == "text"]
             if not text_blocks:
                 raise RuntimeError(f"응답에 텍스트 블록이 없음: {json.dumps(result, ensure_ascii=False)[:300]}")
-            return "\n".join(text_blocks)
+            usage = result.get("usage", {})
+            return {
+                "answer": "\n".join(text_blocks),
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+            }
 
         try:
-            answer = await loop.run_in_executor(None, _call_claude)
+            start = time.perf_counter()
+            call_result = await loop.run_in_executor(None, _call_claude)
+            elapsed = round(time.perf_counter() - start, 2)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             return JSONResponse({"error": f"Claude API 호출 실패({exc.code}): {detail}"}, status_code=502)
         except Exception as exc:  # noqa: BLE001 — 데모 화면에 원인을 그대로 보여주기 위함
             return JSONResponse({"error": f"Claude API 호출 실패: {exc}"}, status_code=502)
-        return JSONResponse({"mode": "claude", "answer": answer, "sources": []})
+
+        # 2026-09-19 확인한 claude-sonnet-5 공식 단가(입력 $2/1M, 출력 $10/1M) — 사용자가
+        # "비용이 발생하니 눈에 보이게 하자"고 요청한 항목이라, 토큰 수뿐 아니라 실제
+        # 비용 환산까지 같이 보여준다. 원화 표시는 사용자 요청(2026-09-19)으로 환율
+        # 1,400원 고정 — 실시간 환율 API를 새로 붙이는 것보단, "대략 얼마인지 감"만
+        # 잡으면 되는 데모 용도에 고정값이 더 단순하고 충분하다고 판단.
+        input_tokens = call_result["input_tokens"]
+        output_tokens = call_result["output_tokens"]
+        cost_usd = input_tokens / 1_000_000 * 2.0 + output_tokens / 1_000_000 * 10.0
+        cost_krw = round(cost_usd * 1400)
+        return JSONResponse({
+            "mode": "claude", "answer": call_result["answer"], "sources": [], "elapsed": elapsed,
+            "input_tokens": input_tokens, "output_tokens": output_tokens, "cost_krw": cost_krw,
+        })
 
     if mode == "finetuned":
         adapter_dir = _ROOT / "experiments" / "edu-social-lora" / "final"
         if not adapter_dir.exists():
             return JSONResponse({"error": "파인튜닝 어댑터가 없습니다 — 먼저 학습을 실행하세요"}, status_code=400)
+        if _gpu_llm_busy:
+            # train과 동일한 이유 — 이 서브프로세스도 transformers로 같은 물리 GPU에
+            # 모델을 올린다(2026-09-19).
+            return JSONResponse({"error": "통합관제가 GPU로 추론 중입니다. 잠시 후 다시 시도해주세요."}, status_code=409)
 
         def _run_subprocess():
             return subprocess.run(
@@ -1040,13 +1265,910 @@ async def edu_admin_ask(request: Request):
                 capture_output=True, text=True, timeout=120,
             )
 
+        start = time.perf_counter()
         proc = await loop.run_in_executor(None, _run_subprocess)
+        elapsed = round(time.perf_counter() - start, 2)
         if proc.returncode != 0:
             return JSONResponse({"error": f"어댑터 실행 실패: {proc.stderr[-800:]}"}, status_code=500)
         try:
             parsed = json.loads(proc.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError):
             return JSONResponse({"error": "어댑터 응답 파싱 실패"}, status_code=500)
-        return JSONResponse({"mode": "finetuned", "answer": parsed["answer"], "sources": []})
+        return JSONResponse({"mode": "finetuned", "answer": parsed["answer"], "sources": [], "elapsed": elapsed})
 
     return JSONResponse({"error": "알 수 없는 모드"}, status_code=400)
+
+
+_QUIZ_SYSTEM_PROMPT = (
+    "당신은 친근한 중학교 사회 선생님입니다. 아래 [참고 자료]에 실제로 쓰여 있는 문장 하나를 그대로 "
+    "활용해 객관식 퀴즈 1문제를 만드세요.\n"
+    "반드시 지켜야 할 규칙:\n"
+    "1. [참고 자료]에 등장하지 않는 지역·나라·수치는 절대 언급하지 마세요(자료에 없는 대상과 "
+    "비교하는 문제를 만들지 마세요).\n"
+    "2. 정답과 오답 선택지 모두 [참고 자료]에 나온 표현을 최대한 그대로 사용하세요.\n"
+    "3. question 필드는 학생에게 말하듯 친근한 구어체로 쓰세요(예: '~할까요?', '~인 거 아시나요?' 같은 "
+    "말투). choices와 explanation은 자료 표현을 그대로 유지하세요.\n"
+    "4. 설명 없이 반드시 아래 JSON 형식으로만 답하세요:\n"
+    '{"question": "...", "choices": ["...", "...", "...", "..."], "answer_index": 0, "explanation": "..."}'
+)
+
+
+def _quiz_choice_grounded(choice_text: str, context: str) -> bool:
+    """정답 선택지가 실제로 [참고 자료]에서 나온 표현인지 코드로 한 번 더 확인한다.
+    프롬프트로 "자료에 없는 걸 지어내지 마라"고 시켜도 4B급 소형 모델이 완전히
+    지키진 못한다(2026-09-19 실측 — 지시 전엔 "서울 90%, 부산 70%" 식으로 자료에
+    없는 비교를 만들어냄). 정답 문장의 명사·숫자 토큰 중 상당수가 실제로 context에
+    그대로 있어야 '근거 있음'으로 인정 — 완벽하진 않지만(토큰이 다른 조합으로 재구성돼도
+    통과할 수 있음) 아예 새로 지어낸 내용은 걸러낸다."""
+    tokens = [t for t in re.findall(r"[가-힣]{2,}|\d+(?:\.\d+)?%?", choice_text) if len(t) > 1]
+    if not tokens:
+        return True
+    matched = sum(1 for t in tokens if t in context)
+    return (matched / len(tokens)) >= 0.7
+
+
+@app.post("/api/edu-admin/quiz")
+async def edu_admin_quiz(request: Request):
+    """RAG로 검색한 근거 문서를 그대로 재료 삼아 객관식 퀴즈 1문제를 만든다 — 학생이
+    방금 물어본 질문과 같은 자료를 활용(사용자 요청, 2026-09-19)."""
+    payload = await request.json()
+    question = (payload.get("question") or "").strip()
+    school_level = payload.get("school_level", _DEFAULT_SCHOOL_LEVEL)
+    subject = payload.get("subject", _DEFAULT_SUBJECT)
+    if not question:
+        return JSONResponse({"error": "질문을 입력하세요"}, status_code=400)
+    if _state.get("edu_index") is None:
+        return JSONResponse({"error": "RAG 인덱스가 없습니다"}, status_code=400)
+    if _edu_job_status().get("status") == "running":
+        return JSONResponse({"error": "학습이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
+
+    allowed_source_ids = {cfg.source_id for cfg in collect_registry.sources_for(school_level, subject)}
+    loop = asyncio.get_event_loop()
+
+    def _run_quiz():
+        hits = query_edu.retrieve(question, _state["edu_embed_model"], _state["edu_index"],
+                                   _state["edu_meta"], _state["edu_bm25"], allowed_source_ids=allowed_source_ids)
+        if not hits:
+            return None, "", []
+        context = "\n".join(f"[{h['title']}] {h['text'][:400]}" for h, _ in hits)
+        messages = [
+            {"role": "system", "content": _QUIZ_SYSTEM_PROMPT},
+            {"role": "user", "content": f"[참고 자료]\n{context}"},
+        ]
+        # _state["llm"]을 통합관제와 공유하므로 RAG 모드와 동일하게 락으로 직렬화한다
+        # (SIGSEGV 원인, 89번 참고).
+        with _llm_lock:
+            result = _state["llm"].create_chat_completion(messages=messages, temperature=0.0, max_tokens=400)
+        raw = result["choices"][0]["message"]["content"]
+        return raw, context, [h["title"] for h, _ in hits]
+
+    start = time.perf_counter()
+    raw, context, source_titles = await loop.run_in_executor(None, _run_quiz)
+    elapsed = round(time.perf_counter() - start, 2)
+
+    if raw is None:
+        return JSONResponse({"error": "선택한 학교급·과목에는 아직 수집된 자료가 없습니다."}, status_code=400)
+
+    try:
+        quiz = json.loads(raw)
+        choices = quiz["choices"]
+        answer_index = int(quiz["answer_index"])
+        if not (isinstance(choices, list) and len(choices) == 4 and 0 <= answer_index < 4):
+            raise ValueError("형식 불일치")
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return JSONResponse({"error": "퀴즈 형식 생성에 실패했습니다 — 다시 시도해 주세요"}, status_code=502)
+
+    if not _quiz_choice_grounded(choices[answer_index], context):
+        return JSONResponse({"error": "이 자료로는 근거가 확실한 퀴즈를 만들지 못했습니다 — 다른 질문으로 시도해 주세요"}, status_code=502)
+
+    return JSONResponse({
+        "quiz": quiz, "sources": source_titles, "elapsed": elapsed,
+    })
+
+
+# ── AI 토론(2026-09-19) ──────────────────────────────────────────────────
+# 설계 원칙은 이 프로젝트 전체와 동일 — "판정은 코드, LLM은 언어만". 처음엔 LLM에게
+# "사전 정의한 2~4개 입장 중 하나로 분류하라"고 시켰는데, 실사용 중 학생 15명 전원이
+# 한 팀에 쏠리는 걸 실제로 겪었다(LLM 분류가 통째로 실패하면 방어적 기본값이 전부
+# 첫 카테고리로 떨어지는 구조였음). 대신 이미 RAG에 쓰는 임베딩 모델로 의견을
+# 벡터화해서 표준 k-means로 자연스러운 묶음을 찾고, 그 위에 "정원을 넘지 않는 선에서
+# 제일 가까운 팀에 배정"하는 그리디 규칙으로 크기를 강제로 맞춘다 — 팀을 나누는
+# 결정 자체가 전부 코드/수학이고, LLM은 그렇게 정해진 팀에 이름만 붙인다.
+
+_DEBATE_TOPIC_PROMPT = (
+    "당신은 중학교 사회 토론 수업을 준비하는 선생님입니다. 아래 키워드로 학생들이 토론할 만한 "
+    "질문을 하나 만드세요. 찬반이나 여러 입장으로 의견이 나뉠 수 있는 질문이어야 하고, 특정 "
+    "입장 쪽으로 기울지 않은 균형 잡힌 질문이어야 합니다.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요:\n"
+    '{"topic": "..."}'
+)
+
+_DEBATE_OPINIONS_PROMPT_TMPL = (
+    "당신은 중학교 사회 수업의 토론 진행자입니다. 아래 [토론 주제]에 대해, 중학생 {n}명이 각자 "
+    "낼 법한 의견을 만드세요. 학생마다 서로 다른 생각을 갖도록 다양하게 작성하세요(전원이 같은 "
+    "의견이면 안 됩니다 — 찬성·반대뿐 아니라 여러 각도의 의견이 골고루 섞이게 하세요). 이름은 "
+    "실제로 쓸 법한 흔한 한국 이름(성+이름)으로 학생마다 다르게 지으세요. 의견은 50~100자, "
+    "중학생 말투로 쓰세요.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요(정확히 {n}명):\n"
+    '{{"students": [{{"name": "...", "opinion": "..."}}, ...]}}'
+)
+
+_DEBATE_TEAM_LABEL_PROMPT_TMPL = (
+    "당신은 중학교 사회 토론 수업을 준비하는 선생님입니다. 아래는 [토론 주제]에 대해 이미 "
+    "비슷한 의견끼리 묶여 있는 {k}개 그룹입니다(그룹을 다시 나누지 마세요 — 이미 확정된 그룹임). "
+    "각 그룹 학생들의 공통된 관점을 5~15자의 짧은 표현으로 요약해 이름만 붙이세요.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요(그룹 순서와 정확히 같은 순서, {k}개):\n"
+    '{{"labels": ["...", ...]}}'
+)
+
+_DEBATE_SUMMARY_PROMPT = (
+    "당신은 중학교 사회 토론 수업을 진행한 선생님입니다. 아래는 토론 전/후 학생 입장 변화를 "
+    "코드로 집계한 통계입니다(숫자는 이미 정확히 계산되어 있음). 이 결과를 학급에 설명하듯 "
+    "두세 문장으로 요약하세요. 주어진 숫자 외의 새로운 수치를 지어내지 마세요.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요:\n"
+    '{"summary": "..."}'
+)
+
+_DEBATE_REOPINION_PROMPT = (
+    "당신은 중학교 사회 수업의 토론 진행자입니다. 아래는 학생별 토론 전 의견과, 그 학생이 속한 "
+    "팀이 읽은 참고 자료입니다. 이 자료를 읽은 뒤 학생이 다시 의견을 낸다면 어떻게 답할지 "
+    "만드세요 — 원래 의견이 자료를 반영해 바뀌거나, 더 구체적인 근거를 들거나, 그대로 유지될 "
+    "수도 있습니다. 자연스럽게 다양한 반응으로 쓰세요. 50~100자, 중학생 말투.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요(학생 순서와 정확히 같은 순서, 같은 개수):\n"
+    '{"students": [{"opinion": "..."}, ...]}'
+)
+
+
+def _llm_json_call(system_prompt: str, user_content: str, temperature: float = 0.0, max_tokens: int = 800) -> dict:
+    """공유 LLM으로 JSON 응답 하나를 받는다 — 퀴즈·AI토론이 반복하는 패턴이라 공통
+    헬퍼로 뺐다. _llm_lock으로 직렬화(SIGSEGV 원인, 89번 참고) — 반드시 executor
+    스레드 안에서만 호출할 것(락 획득 자체가 블로킹이라 이벤트 루프에서 직접 부르면 안 됨)."""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    with _llm_lock:
+        result = _state["llm"].create_chat_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
+    return json.loads(result["choices"][0]["message"]["content"])
+
+
+def _llm_raw_call(system_prompt: str, user_content: str, temperature: float = 0.0, max_tokens: int = 800) -> str:
+    """_llm_json_call과 같지만 파싱하지 않고 원문을 그대로 돌려준다 — 여러 항목의
+    배열(학생 N명 등)을 만들 때는 JSON 전체 파싱보다 관대한(정규식 기반) 복구가
+    필요해서(_parse_student_list/_parse_opinion_list 참고), 호출부에서 직접 처리한다."""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    with _llm_lock:
+        result = _state["llm"].create_chat_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
+    return result["choices"][0]["message"]["content"]
+
+
+def _parse_student_list(raw: str) -> list[dict]:
+    """{"students": [{"name":..., "opinion":...}, ...]} 배열을 파싱하되, 전체 JSON이
+    깨져도 개별 항목은 정규식으로 복구를 시도한다(2026-09-19 실측 발견) — 15명 생성을
+    시켰더니 한 항목에서 모델이 `"}` 대신 `")`를 써서(중학생 말투 문장 끝에 괄호를
+    섞어 쓰다 실수) 배열 전체 파싱이 깨졌다. 학생 한둘이 유실되는 건 허용 오차로
+    보고(호출부에서 최소 인원만 확인), 항목 몇 개 때문에 전체를 재시도시키지 않는다."""
+    try:
+        data = json.loads(raw)
+        items = data.get("students", [])
+        if isinstance(items, list) and items:
+            return items
+    except json.JSONDecodeError:
+        pass
+    pattern = re.compile(r'"name"\s*:\s*"([^"]*)"\s*,\s*"opinion"\s*:\s*"([^"]*)"')
+    return [{"name": m.group(1), "opinion": m.group(2)} for m in pattern.finditer(raw)]
+
+
+def _parse_opinion_list(raw: str) -> list[str]:
+    """{"students": [{"opinion":...}, ...]} 배열 전용 — _parse_student_list와 같은
+    이유로 관대하게 복구한다(토론 후 재의견 수집에서도 같은 배열 파싱 위험이 있음)."""
+    try:
+        data = json.loads(raw)
+        items = data.get("students", [])
+        if isinstance(items, list) and items:
+            return [(it.get("opinion") or "").strip() for it in items]
+    except json.JSONDecodeError:
+        pass
+    pattern = re.compile(r'"opinion"\s*:\s*"([^"]*)"')
+    return [m.group(1) for m in pattern.finditer(raw)]
+
+
+def _balanced_cluster_assignment(vectors: np.ndarray, k: int, seed: int = 0) -> list[int]:
+    """임베딩 벡터를 k개 그룹으로 최대한 균등하게 나눈다(사용자 요청, 2026-09-19) —
+    LLM에게 직접 분류시켰다가 15명 전원이 한 팀으로 쏠리는 걸 실제로 겪은 뒤 도입.
+    표준 k-means로 자연스러운 중심을 먼저 찾고(비슷한 의견끼리 뭉치는 성질은 유지),
+    그 중심까지 거리 기준으로 "정원을 넘지 않는 선에서 제일 가까운 팀에 배정"하는
+    그리디 방식으로 크기를 강제로 맞춘다. seed를 바꾸면 "재배치" 버튼이 다른 초기
+    중심에서 시작해 다른 묶음을 만든다."""
+    n = len(vectors)
+    k = max(1, min(k, n))
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(n, size=k, replace=False)
+    centroids = vectors[idx].copy()
+    labels = np.full(n, -1)
+    for _ in range(20):
+        dists = np.linalg.norm(vectors[:, None, :] - centroids[None, :, :], axis=2)
+        new_labels = dists.argmin(axis=1)
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
+        for c in range(k):
+            pts = vectors[labels == c]
+            if len(pts) > 0:
+                centroids[c] = pts.mean(axis=0)
+
+    dists = np.linalg.norm(vectors[:, None, :] - centroids[None, :, :], axis=2)
+    base = n // k
+    target = [base + (1 if i < n % k else 0) for i in range(k)]
+    order = np.argsort(dists.min(axis=1))  # 자기 그룹이 확실한 학생부터 먼저 배정
+    capacity = target.copy()
+    assignment = [-1] * n
+    for i in order:
+        for c in np.argsort(dists[i]):
+            if capacity[c] > 0:
+                assignment[i] = int(c)
+                capacity[c] -= 1
+                break
+    return assignment
+
+
+@app.post("/api/edu-admin/debate/topic")
+async def edu_admin_debate_topic(request: Request):
+    """키워드 하나로 토론 주제를 자동 생성 — 직접 입력을 원하면 이 단계는 건너뛴다."""
+    payload = await request.json()
+    keyword = (payload.get("keyword") or "").strip()
+    if not keyword:
+        return JSONResponse({"error": "키워드를 입력하세요"}, status_code=400)
+    if _edu_job_status().get("status") == "running":
+        return JSONResponse({"error": "학습이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        data = _llm_json_call(_DEBATE_TOPIC_PROMPT, f"[키워드]\n{keyword}", temperature=0.7, max_tokens=200)
+        topic = (data.get("topic") or "").strip()
+        if not topic:
+            raise ValueError("주제가 비어있음")
+        return topic
+
+    try:
+        topic = await loop.run_in_executor(None, _run)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return JSONResponse({"error": "주제 생성에 실패했습니다 — 다시 시도해 주세요"}, status_code=502)
+    return JSONResponse({"topic": topic})
+
+
+@app.post("/api/edu-admin/debate/opinions")
+async def edu_admin_debate_opinions(request: Request):
+    """학생 의견 에뮬레이션 — 이름·입장을 아직 정하지 않고 의견 텍스트만 다양하게
+    생성한다(사용자 요청, 2026-09-19). 팀 배정은 별도 엔드포인트에서 코드가 결정한다
+    — 의견 생성(자유 텍스트)과 그룹 배정(제약이 있는 결정)을 분리해야, 사용자가 팀
+    개수를 바꾸거나 "재배치"를 눌러도 의견 자체는 다시 만들 필요가 없다."""
+    payload = await request.json()
+    topic = (payload.get("topic") or "").strip()
+    num_students = max(4, min(int(payload.get("num_students", 10)), 20))
+    if not topic:
+        return JSONResponse({"error": "토론 주제를 입력하거나 키워드로 먼저 생성하세요"}, status_code=400)
+    if _edu_job_status().get("status") == "running":
+        return JSONResponse({"error": "학습이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        raw = _llm_raw_call(
+            _DEBATE_OPINIONS_PROMPT_TMPL.format(n=num_students), f"[토론 주제]\n{topic}",
+            temperature=0.9, max_tokens=120 * num_students,
+        )
+        students_raw = _parse_student_list(raw)
+        if len(students_raw) < 2:
+            raise ValueError("학생 의견 생성 실패")
+        # 이름이 비었거나 중복되면 코드가 안전하게 보정 — LLM이 가짜 이름을 잘 못
+        # 짓거나 같은 이름을 반복해도 화면에서 학생을 구분할 수 있어야 한다.
+        seen_names: set[str] = set()
+        students = []
+        for i, s in enumerate(students_raw):
+            name = (s.get("name") or "").strip() or f"학생{i + 1}"
+            if name in seen_names:
+                name = f"{name}({i + 1})"
+            seen_names.add(name)
+            opinion = (s.get("opinion") or "").strip()
+            if not opinion:
+                continue
+            students.append({"id": len(students), "name": name, "opinion": opinion})
+        if len(students) < 2:
+            raise ValueError("유효한 학생 의견이 부족함")
+        return students
+
+    try:
+        students = await loop.run_in_executor(None, _run)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return JSONResponse({"error": "학생 의견 생성에 실패했습니다 — 다시 시도해 주세요"}, status_code=502)
+
+    return JSONResponse({"topic": topic, "students": students})
+
+
+@app.post("/api/edu-admin/debate/teams")
+async def edu_admin_debate_teams(request: Request):
+    """학생 의견을 임베딩해서 team_count개로 최대한 균등하게 묶는다(코드가 결정) —
+    LLM은 이미 정해진 그룹에 이름만 붙인다. 팀 근거자료는 기존 RAG를 재사용, 근거가
+    없으면 빈 목록을 그대로 보여준다(퀴즈의 grounding 원칙과 동일). seed를 바꾸면
+    "재배치" 버튼이 다른 초기 중심에서 시작해 다른 묶음을 만든다."""
+    payload = await request.json()
+    topic = (payload.get("topic") or "").strip()
+    students = payload.get("students", [])
+    team_count = max(2, min(int(payload.get("team_count", 3)), 6))
+    seed = int(payload.get("seed", 0))
+    school_level = payload.get("school_level", _DEFAULT_SCHOOL_LEVEL)
+    subject = payload.get("subject", _DEFAULT_SUBJECT)
+    if not topic or len(students) < team_count:
+        return JSONResponse({"error": "학생 수가 팀 수보다 적습니다"}, status_code=400)
+    if _state.get("edu_index") is None:
+        return JSONResponse({"error": "RAG 인덱스가 없습니다"}, status_code=400)
+    if _edu_job_status().get("status") == "running":
+        return JSONResponse({"error": "학습이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
+
+    allowed_source_ids = {cfg.source_id for cfg in collect_registry.sources_for(school_level, subject)}
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        opinions = [s["opinion"] for s in students]
+        vectors = np.asarray(_state["edu_embed_model"].encode(opinions, normalize_embeddings=True))
+        assignment = _balanced_cluster_assignment(vectors, team_count, seed=seed)
+
+        groups: dict[int, list[int]] = {}
+        for student_idx, team_idx in enumerate(assignment):
+            groups.setdefault(team_idx, []).append(students[student_idx]["id"])
+        team_ids = sorted(groups.keys())
+
+        sample_text = "\n".join(
+            f"그룹{rank + 1}: " + " / ".join(
+                s["opinion"] for s in students if s["id"] in groups[tid][:4]
+            )
+            for rank, tid in enumerate(team_ids)
+        )
+        label_data = _llm_json_call(
+            _DEBATE_TEAM_LABEL_PROMPT_TMPL.format(k=len(team_ids)),
+            f"[토론 주제]\n{topic}\n\n[그룹별 샘플 의견]\n{sample_text}",
+            temperature=0.3, max_tokens=300,
+        )
+        labels = label_data.get("labels", [])
+        if len(labels) != len(team_ids):
+            labels = [f"팀 {i + 1}" for i in range(len(team_ids))]
+
+        teams = []
+        for rank, tid in enumerate(team_ids):
+            label = (labels[rank] or "").strip() or f"팀 {rank + 1}"
+            hits = query_edu.retrieve(
+                f"{topic} {label}", _state["edu_embed_model"], _state["edu_index"], _state["edu_meta"],
+                _state["edu_bm25"], top_k=3, allowed_source_ids=allowed_source_ids,
+            )
+            teams.append({
+                "id": rank, "label": label, "student_ids": groups[tid],
+                "materials": [{"title": h["title"], "text": h["text"][:500], "score": round(score, 3)} for h, score in hits],
+            })
+        return teams
+
+    try:
+        teams = await loop.run_in_executor(None, _run)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return JSONResponse({"error": "팀 구성에 실패했습니다 — 다시 시도해 주세요"}, status_code=502)
+
+    return JSONResponse({"teams": teams, "seed": seed})
+
+
+@app.post("/api/edu-admin/debate/conclude")
+async def edu_admin_debate_conclude(request: Request):
+    """토론 종료 후 의견을 다시 수집하고, 토론 전/후 변화를 임베딩 거리로 집계한다
+    (판정은 코드) — 각 팀의 "이전 의견들의 평균 벡터"를 중심으로 삼아, 토론 후 의견이
+    자기 팀 중심과 다른 팀 중심 중 어디에 더 가까워졌는지로 "유지/이동"을 계산한다."""
+    payload = await request.json()
+    topic = (payload.get("topic") or "").strip()
+    students = payload.get("students", [])
+    teams = payload.get("teams", [])
+    if not topic or not students or not teams:
+        return JSONResponse({"error": "토론 데이터가 없습니다 — 먼저 토론을 시작하세요"}, status_code=400)
+    if _edu_job_status().get("status") == "running":
+        return JSONResponse({"error": "학습이 진행 중입니다. 완료 후 다시 시도해주세요."}, status_code=409)
+
+    team_by_student: dict[int, dict] = {}
+    for t in teams:
+        for sid in t["student_ids"]:
+            team_by_student[sid] = t
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        # 팀별로 한 번씩만 호출한다(2026-09-19 실측 발견) — 학생마다 팀 자료 전문을
+        # 반복해서 넣었더니, 15명 정도만 돼도 입력이 컨텍스트 윈도우(4096)를 넘어
+        # "Requested tokens exceed context window" 에러로 죽었다. 같은 팀 학생들은
+        # 어차피 같은 자료를 읽었으니 자료는 팀당 한 번만 보여주면 충분하고, 호출을
+        # 팀 단위로 쪼개면 학생 수·팀 수가 늘어도 한 호출의 크기는 항상 팀 하나
+        # 분량으로 고정돼 안전하다.
+        opinions_after_by_id: dict[int, str] = {}
+        for t in teams:
+            members = [s for s in students if s["id"] in t["student_ids"]]
+            if not members:
+                continue
+            mats = t.get("materials", [])
+            mat_text = " / ".join(m["text"][:300] for m in mats) or "(근거 자료 없음)"
+            lines = [f"{i + 1}. 이름: {s['name']} / 원래 의견: {s['opinion']}" for i, s in enumerate(members)]
+            user = (
+                f"[토론 주제]\n{topic}\n\n[이 팀({t['label']})이 읽은 참고 자료]\n{mat_text}\n\n"
+                "[학생별 토론 전 의견]\n" + "\n".join(lines)
+            )
+            raw = _llm_raw_call(_DEBATE_REOPINION_PROMPT, user, temperature=0.8, max_tokens=150 * len(members))
+            after_opinions = _parse_opinion_list(raw)
+            # 항목 하나가 깨져서 개수가 살짝 모자라도 전체를 실패시키지 않는다 —
+            # 못 받은 학생은 "의견 유지"로 간주해 원래 의견을 그대로 쓴다(사용자
+            # 실측 발견, 2026-09-19: 15명 중 한 명 파싱 실패로 전체가 502 나던 문제).
+            for i, s in enumerate(members):
+                opinions_after_by_id[s["id"]] = after_opinions[i].strip() if i < len(after_opinions) and after_opinions[i].strip() else s["opinion"]
+
+        opinions_after = [opinions_after_by_id.get(s["id"], "") for s in students]
+
+        before_vecs = np.asarray(_state["edu_embed_model"].encode([s["opinion"] for s in students], normalize_embeddings=True))
+        after_vecs = np.asarray(_state["edu_embed_model"].encode(opinions_after, normalize_embeddings=True))
+
+        id_to_idx = {s["id"]: i for i, s in enumerate(students)}
+        centroids = []
+        for t in teams:
+            idxs = [id_to_idx[sid] for sid in t["student_ids"] if sid in id_to_idx]
+            centroids.append(before_vecs[idxs].mean(axis=0) if idxs else np.zeros(before_vecs.shape[1]))
+        centroids = np.asarray(centroids)
+
+        results = []
+        for i, s in enumerate(students):
+            own_team = team_by_student[s["id"]]
+            dists_after = np.linalg.norm(centroids - after_vecs[i], axis=1)
+            nearest_team = teams[int(dists_after.argmin())]
+            stayed = nearest_team["id"] == own_team["id"]
+            results.append({
+                **s, "opinion_after": opinions_after[i],
+                "team_before": own_team["label"], "team_after": nearest_team["label"], "stayed": stayed,
+            })
+        return results
+
+    try:
+        results = await loop.run_in_executor(None, _run)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return JSONResponse({"error": "토론 후 의견 수집에 실패했습니다 — 다시 시도해 주세요"}, status_code=502)
+
+    team_stats = []
+    for t in teams:
+        members = [r for r in results if r["team_before"] == t["label"]]
+        team_stats.append({
+            "label": t["label"], "total": len(members),
+            "stayed": sum(1 for m in members if m["stayed"]),
+            "moved": sum(1 for m in members if not m["stayed"]),
+        })
+    overall = {"total": len(results), "stayed": sum(1 for r in results if r["stayed"]), "moved": sum(1 for r in results if not r["stayed"])}
+
+    # 요약 의견(사용자 요청, 2026-09-19) — 숫자 자체는 이미 위에서 코드가 다 계산해
+    # 뒀으니, LLM에게는 그 숫자를 문장으로 풀어 설명하는 것만 맡긴다(판정은 코드,
+    # LLM은 언어만). 실패해도 그래프 자체는 이미 있으니 조용히 생략하고 넘어간다.
+    def _gen_summary_text():
+        stats_text = f"전체: 유지 {overall['stayed']}명 / 이동 {overall['moved']}명 (총 {overall['total']}명)\n"
+        stats_text += "\n".join(f"- {t['label']}: 유지 {t['stayed']}명 / 이동 {t['moved']}명" for t in team_stats)
+        try:
+            data = _llm_json_call(_DEBATE_SUMMARY_PROMPT, f"[토론 주제]\n{topic}\n\n[통계]\n{stats_text}", temperature=0.3, max_tokens=300)
+            return (data.get("summary") or "").strip()
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return ""
+
+    summary_text = await loop.run_in_executor(None, _gen_summary_text)
+
+    return JSONResponse({
+        "students": results,
+        "summary_text": summary_text,
+        "summary": overall,
+        "team_stats": team_stats,
+    })
+
+
+# ── BidRadar 연동 API (2026-09-20) ────────────────────────────────────────
+# 별개 프로젝트(BidRadar)와 코드·인프라를 섞지 않는다는 원칙(CLAUDE.md)은 지키되,
+# 이건 "섞는" 게 아니라 이 프로젝트가 처음부터 서빙 API 용도로 아껴둔 포트(28081→8081,
+# 의사결정_로그 5번 "나중에 실제 sLLM 서빙 API가 써야 한다")를 실제로 쓰는 것 —
+# BidRadar의 요구사항 문서(2026-09-20)에서 합의한 공통 원칙 3가지를 그대로 반영한다:
+# 판정 금지(분류·추출만, 최종 판정은 호출 측 코드) · 근거 필수(원문 인용) ·
+# 조용한 실패 금지(실패 시 사유 명시 에러 응답). 유스케이스 C(첨부문서 분류)부터
+# 구현 — 가장 입력이 짧고 스키마가 단순해 위험이 낮다.
+
+_BIDRADAR_CLASSIFY_DOC_PROMPT = (
+    "당신은 공공입찰 공고 첨부문서를 분류하는 보조 도구입니다. 아래 [문서 일부]가 실제 사업 "
+    "내용이 아니라 제출서류 양식·법령 안내·공통 서식 같은 공통문서(boilerplate)인지 판단하세요. "
+    "충족 여부나 사업 적합성 같은 다른 판정은 절대 하지 마세요 — 공통문서인지 아닌지만 분류합니다.\n"
+    "reason에는 반드시 [문서 일부]에 실제로 등장하는 표현을 그대로 인용하세요 — 지어내지 마세요.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요:\n"
+    '{"is_boilerplate": true, "reason": "..."}'
+)
+
+
+_bidradar_call_log: list[dict] = []
+_MAX_BIDRADAR_LOG = 300
+
+_bidradar_jobs: dict[str, dict] = {}
+_MAX_BIDRADAR_JOBS = 100
+
+
+def _log_bidradar_call(
+    endpoint: str, trace_id: str, success: bool,
+    latency_ms: int = 0, tokens_in: int = 0, tokens_out: int = 0, error_code: str | None = None,
+) -> None:
+    """실제 BidRadar 호출 기록 — 시뮬레이션이 아니라 진짜 트래픽을 남긴다(사용자 요청,
+    2026-09-20 "실제 연동되는 상황을 실시간으로 보여주면 좋겠다"). control-room의
+    _simulation_history와 같은 패턴(런타임 동안만 유지, 배포 재시작 전까지)."""
+    _bidradar_call_log.insert(0, {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "endpoint": endpoint, "trace_id": trace_id, "success": success,
+        "latency_ms": latency_ms, "tokens_in": tokens_in, "tokens_out": tokens_out, "error_code": error_code,
+    })
+    del _bidradar_call_log[_MAX_BIDRADAR_LOG:]
+
+
+def _bidradar_check_auth(request: Request) -> JSONResponse | None:
+    """내부망 토큰 인증(BidRadar와 합의, 8절) — 실패 시 반환용 에러 응답, 통과하면 None.
+    토큰은 ANTHROPIC_API_KEY와 같은 패턴으로 systemctl --user set-environment로 서버에
+    직접 등록한다(git·채팅에 평문 노출 금지, 이 프로젝트 전체 관행과 동일)."""
+    expected = os.environ.get("BIDRADAR_API_TOKEN")
+    if not expected:
+        return JSONResponse({"error": {"code": "server_not_configured", "message": "BIDRADAR_API_TOKEN이 서버에 설정되지 않았습니다"}}, status_code=503)
+    auth = request.headers.get("authorization", "")
+    token = auth[7:] if auth.lower().startswith("bearer ") else ""
+    if token != expected:
+        return JSONResponse({"error": {"code": "unauthorized", "message": "인증 토큰이 없거나 올바르지 않습니다"}}, status_code=401)
+    return None
+
+
+@app.post("/v1/classify-doc")
+async def bidradar_classify_doc(request: Request):
+    """유스케이스 C — 첨부문서가 공통서식(boilerplate)인지 분류. BidRadar 요구사항
+    문서 4절 스키마·5절 공통 계약을 그대로 따른다."""
+    auth_error = _bidradar_check_auth(request)
+    if auth_error is not None:
+        return auth_error
+
+    payload = await request.json()
+    input_text = (payload.get("input_text") or "").strip()
+    trace_id = payload.get("trace_id", "")
+    max_tokens = min(int(payload.get("max_tokens", 200)), 500)
+    if not input_text:
+        _log_bidradar_call("classify-doc", trace_id, False, error_code="empty_input")
+        return JSONResponse({"error": {"code": "empty_input", "message": "input_text가 비어있습니다"}, "trace_id": trace_id}, status_code=400)
+
+    loop = asyncio.get_event_loop()
+    start = time.perf_counter()
+
+    def _run():
+        messages = [
+            {"role": "system", "content": _BIDRADAR_CLASSIFY_DOC_PROMPT},
+            {"role": "user", "content": f"[문서 일부]\n{input_text}"},
+        ]
+        # _state["llm"]은 산업안전 통합관제·AI튜터·AI토론과 공유하는 동일 인스턴스라
+        # _llm_lock으로 직렬화한다(SIGSEGV 원인, 89번) — 여기도 예외 없이 적용.
+        with _llm_lock:
+            result = _state["llm"].create_chat_completion(messages=messages, temperature=0.0, max_tokens=max_tokens)
+        raw = result["choices"][0]["message"]["content"]
+        usage = result.get("usage", {})
+        return raw, usage
+
+    try:
+        raw, usage = await loop.run_in_executor(None, _run)
+    except Exception as exc:  # noqa: BLE001 — 조용한 실패 금지(BidRadar 요구사항 1절) — 원인을 그대로 알려준다
+        _log_bidradar_call("classify-doc", trace_id, False, latency_ms=round((time.perf_counter() - start) * 1000), error_code="inference_failed")
+        return JSONResponse({"error": {"code": "inference_failed", "message": str(exc)}, "trace_id": trace_id}, status_code=502)
+
+    try:
+        data = json.loads(raw)
+        is_boilerplate = bool(data["is_boilerplate"])
+        reason = str(data.get("reason", "")).strip()
+        if not reason:
+            raise ValueError("reason 누락")
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        # 조용한 실패 금지 — 빈 결과 대신 사유를 명시한 실패 응답(BidRadar가 "확인 필요"로 넘김)
+        _log_bidradar_call("classify-doc", trace_id, False, latency_ms=round((time.perf_counter() - start) * 1000), error_code="malformed_output")
+        return JSONResponse({"error": {"code": "malformed_output", "message": "분류 결과 형식이 올바르지 않습니다"}, "trace_id": trace_id}, status_code=502)
+
+    latency_ms = round((time.perf_counter() - start) * 1000)
+    _log_bidradar_call("classify-doc", trace_id, True, latency_ms=latency_ms, tokens_in=usage.get("prompt_tokens", 0), tokens_out=usage.get("completion_tokens", 0))
+    return JSONResponse({
+        "output": {"is_boilerplate": is_boilerplate, "reason": reason},
+        "model": "Qwen3-4B-Instruct-2507-Q4_K_M",
+        "tokens_in": usage.get("prompt_tokens", 0),
+        "tokens_out": usage.get("completion_tokens", 0),
+        "latency_ms": latency_ms,
+        "trace_id": trace_id,
+    })
+
+
+# ── 유스케이스 B — 관심주제 시맨틱 필터 (2026-09-20) ──────────────────────
+# confidence는 절대 임계값으로 신뢰하지 않는다 — 이 프로젝트에서 실측으로 확인된
+# 한계(8절, 90번 "점수 마진 게이팅 보류"와 같은 근본 원인)다. BidRadar와 합의한 대로
+# 이 값은 키워드 매칭을 대체하지 않고 "사람이 검토할 후보"로만 쓰인다 — 서버 쪽에서도
+# 강제로 걸러내지 않고(예: confidence<0.5는 제외 같은 임의 규칙) 그대로 다 돌려준다.
+
+_BIDRADAR_CLASSIFY_TOPIC_PROMPT = (
+    "당신은 입찰공고 제목을 고객 관심주제와 매칭하는 보조 도구입니다. 아래 [공고 제목]이 "
+    "[관심주제 목록] 중 의미적으로 관련된 주제가 있는지 판단하세요. 핵심 키워드가 그대로 "
+    "일치하지 않아도 같은 분야·기술을 가리키면 관련 있다고 판단하되, 확실하지 않으면 "
+    "포함하지 마세요. [관심주제 목록]에 없는 topic_id는 절대 만들지 마세요.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요(관련 주제가 없으면 빈 배열):\n"
+    '{"matches": [{"topic_id": 0, "confidence": 0.0, "reason": "..."}]}'
+)
+
+
+def _parse_topic_matches(raw: str) -> list[dict]:
+    """{"matches": [...]} 파싱 — 전체가 깨져도 개별 항목은 정규식으로 복구한다
+    (AI토론 학생 목록 파싱에서 겪은 것과 같은 배열형 JSON 깨짐 위험에 동일 대응, 92번)."""
+    try:
+        data = json.loads(raw)
+        items = data.get("matches", [])
+        if isinstance(items, list):
+            return items
+    except json.JSONDecodeError:
+        pass
+    pattern = re.compile(r'"topic_id"\s*:\s*(\d+)[^{}]*?"confidence"\s*:\s*([\d.]+)[^{}]*?"reason"\s*:\s*"([^"]*)"')
+    return [{"topic_id": int(m.group(1)), "confidence": float(m.group(2)), "reason": m.group(3)} for m in pattern.finditer(raw)]
+
+
+@app.post("/v1/classify-topic")
+async def bidradar_classify_topic(request: Request):
+    """유스케이스 B — 공고 제목과 고객 관심주제의 의미적 매칭. 키워드 규칙이 놓치는
+    표현 변형을 보조 신호로 잡는다(기존 키워드 매칭을 대체하지 않음, BidRadar 3절)."""
+    auth_error = _bidradar_check_auth(request)
+    if auth_error is not None:
+        return auth_error
+
+    payload = await request.json()
+    title = (payload.get("input_text") or "").strip()
+    topics = (payload.get("context") or {}).get("topics", [])
+    trace_id = payload.get("trace_id", "")
+    if not title:
+        _log_bidradar_call("classify-topic", trace_id, False, error_code="empty_input")
+        return JSONResponse({"error": {"code": "empty_input", "message": "input_text(공고 제목)가 비어있습니다"}, "trace_id": trace_id}, status_code=400)
+    if not topics:
+        _log_bidradar_call("classify-topic", trace_id, False, error_code="empty_topics")
+        return JSONResponse({"error": {"code": "empty_topics", "message": "context.topics가 비어있습니다"}, "trace_id": trace_id}, status_code=400)
+
+    valid_ids = set()
+    topic_lines = []
+    for t in topics:
+        tid = t.get("topic_id")
+        if tid is None:
+            continue
+        valid_ids.add(tid)
+        kw = ", ".join(t.get("keywords", []))
+        topic_lines.append(f"- topic_id={tid}: {t.get('name', '')}" + (f" (키워드: {kw})" if kw else ""))
+
+    loop = asyncio.get_event_loop()
+    start = time.perf_counter()
+
+    def _run():
+        user = f"[공고 제목]\n{title}\n\n[관심주제 목록]\n" + "\n".join(topic_lines)
+        messages = [
+            {"role": "system", "content": _BIDRADAR_CLASSIFY_TOPIC_PROMPT},
+            {"role": "user", "content": user},
+        ]
+        with _llm_lock:
+            result = _state["llm"].create_chat_completion(messages=messages, temperature=0.0, max_tokens=400)
+        return result["choices"][0]["message"]["content"], result.get("usage", {})
+
+    try:
+        raw, usage = await loop.run_in_executor(None, _run)
+    except Exception as exc:  # noqa: BLE001 — 조용한 실패 금지
+        _log_bidradar_call("classify-topic", trace_id, False, latency_ms=round((time.perf_counter() - start) * 1000), error_code="inference_failed")
+        return JSONResponse({"error": {"code": "inference_failed", "message": str(exc)}, "trace_id": trace_id}, status_code=502)
+
+    matches = []
+    for m in _parse_topic_matches(raw):
+        try:
+            tid = m["topic_id"]
+            if tid not in valid_ids:
+                continue  # 목록에 없는 topic_id를 만들어냈으면 버린다(코드가 재검증)
+            conf = max(0.0, min(1.0, float(m.get("confidence", 0))))
+            reason = str(m.get("reason", "")).strip()
+            if not reason:
+                continue
+            matches.append({"topic_id": tid, "confidence": round(conf, 3), "reason": reason})
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    latency_ms = round((time.perf_counter() - start) * 1000)
+    _log_bidradar_call("classify-topic", trace_id, True, latency_ms=latency_ms, tokens_in=usage.get("prompt_tokens", 0), tokens_out=usage.get("completion_tokens", 0))
+    return JSONResponse({
+        "output": {"matches": matches},
+        "model": "Qwen3-4B-Instruct-2507-Q4_K_M",
+        "tokens_in": usage.get("prompt_tokens", 0),
+        "tokens_out": usage.get("completion_tokens", 0),
+        "latency_ms": latency_ms,
+        "trace_id": trace_id,
+    })
+
+
+# ── 유스케이스 A — 나라장터 A2 대체, 청킹 기반 (2026-09-20) ───────────────
+# 컨텍스트 윈도우(4,096토큰)로 전체 문서(BidRadar 실측 중앙값 36,057자, p90 98,950자,
+# 8절)를 한 번에 못 넣어서, rag/chunk.py의 기존 청킹 함수를 재사용해 문서를 조각내고
+# 조각마다 요구사항을 뽑아 합친다 — RAG 파이프라인과 똑같은 도구를 재사용(검증된
+# 컴포넌트를 다른 용도로 다시 쓰는 것뿐, 새 청킹 로직을 또 만들지 않음).
+#
+# v1 스코프 축소를 정직하게 기록: BidRadar의 원래 스키마(사업 항목별 세부, 평가항목,
+# 예산조건, 자격요건, 제출정보 등)는 필드가 매우 많다 — 이번 세션에서 배열형 JSON도
+# 항목이 늘수록 파싱이 깨지는 걸 반복 확인했는데(AI토론 92번), 필드가 훨씬 많은 중첩
+# 객체 스키마는 그보다 더 위험하다고 판단해 requirements 배열 + summary 핵심 4개
+# 필드만 먼저 구현했다. 나머지 필드는 이 v1이 안정적으로 도는 게 확인된 뒤 확장한다.
+
+_BIDRADAR_EXTRACT_REQ_PROMPT = (
+    "당신은 공공입찰 공고 문서에서 요구사항을 추출하는 보조 도구입니다. 아래 [문서 조각]은 "
+    "긴 문서의 일부입니다. 이 조각 안에 있는 구체적인 요구사항(성능·인증·실적·인력 조건 등)만 "
+    "추출하세요 — 이 조각에 없는 내용은 추출하지 마세요. 충족 여부는 절대 판단하지 마세요, "
+    "요구사항 자체만 그대로 정리합니다. cite에는 이 조각에 실제로 있는 문장을 그대로 "
+    "인용하세요 — 지어내지 마세요.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요(이 조각에 요구사항이 없으면 빈 배열):\n"
+    '{"requirements": [{"category": "성능|인증|실적|인력|기타", "req_text": "...", '
+    '"req_value": "", "req_unit": "", "op": "gte|lte|eq|contains|manual", "cite": "..."}]}'
+)
+
+_BIDRADAR_EXTRACT_SUMMARY_PROMPT = (
+    "당신은 공공입찰 공고 문서에서 사업 개요를 추출하는 보조 도구입니다. 아래 [문서 조각]은 "
+    "긴 문서의 앞부분입니다. 이 안에서 찾을 수 있는 정보만 채우고, 없으면 빈 문자열로 두세요 "
+    "— 지어내지 마세요. purpose는 원문을 그대로 발췌하세요(요약 금지).\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요:\n"
+    '{"project_period": "", "project_budget": "", "purpose": "", '
+    '"contact": {"department": "", "role": "", "phone": "", "email": ""}}'
+)
+
+
+def _parse_requirements(raw: str) -> list[dict]:
+    """{"requirements": [...]} 파싱 — 전체가 깨져도 category/req_text/cite 세 핵심
+    필드는 정규식으로 복구한다(92번과 동일한 배열형 JSON 깨짐 대응 패턴)."""
+    try:
+        data = json.loads(raw)
+        items = data.get("requirements", [])
+        if isinstance(items, list):
+            return items
+    except json.JSONDecodeError:
+        pass
+    pattern = re.compile(r'"category"\s*:\s*"([^"]*)"[^{}]*?"req_text"\s*:\s*"([^"]*)"[^{}]*?"cite"\s*:\s*"([^"]*)"')
+    return [{"category": m.group(1), "req_text": m.group(2), "req_value": "", "req_unit": "", "op": "manual", "cite": m.group(3)} for m in pattern.finditer(raw)]
+
+
+def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
+    """백그라운드 스레드(run_in_executor)에서 실행 — 청크 수만큼 순차 LLM 호출이
+    필요해(레이턴시 근본 원인) 동기 응답 대신 job_id를 먼저 돌려주고 여기서 진행한다
+    (BidRadar 질의 2026-09-20, 의사결정_로그 참고). GPU 인스턴스가 있으면 그걸 쓰고
+    (CPU 대비 실측 약 3.7배, quantization_pipeline 벤치마크), 없으면 CPU로 폴백한다.
+    control-room의 GPU 프로파일 추론과 동일하게 _gpu_llm_busy를 세워서 학습이 끼어들지
+    않게 한다."""
+    global _gpu_llm_busy
+    job = _bidradar_jobs[job_id]
+    start = time.perf_counter()
+
+    use_gpu = _state.get("llm_gpu") is not None
+    llm = _state["llm_gpu"] if use_gpu else _state["llm"]
+    lock = _llm_gpu_lock if use_gpu else _llm_lock
+
+    if use_gpu:
+        _gpu_llm_busy = True
+    try:
+        chunks = chunk_text(input_text, target_size=2500, overlap=200)
+        job["chunks_total"] = len(chunks)
+        all_requirements = []
+        total_in = total_out = 0
+
+        for i, chunk in enumerate(chunks):
+            messages = [
+                {"role": "system", "content": _BIDRADAR_EXTRACT_REQ_PROMPT},
+                {"role": "user", "content": f"[문서 조각]\n{chunk}"},
+            ]
+            with lock:
+                result = llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=800)
+            raw = result["choices"][0]["message"]["content"]
+            usage = result.get("usage", {})
+            total_in += usage.get("prompt_tokens", 0)
+            total_out += usage.get("completion_tokens", 0)
+            for r in _parse_requirements(raw):
+                cite = str(r.get("cite", "")).strip()
+                # 근거 필수 원칙(BidRadar 1절) — cite가 실제로 이 조각 원문에 있는지
+                # 코드가 재검증. 퀴즈 기능의 grounding 검증과 같은 함수 재사용(88·89번).
+                if not cite or not _quiz_choice_grounded(cite, chunk):
+                    continue
+                all_requirements.append({
+                    "category": r.get("category", "기타"),
+                    "req_text": str(r.get("req_text", "")).strip(),
+                    "req_value": str(r.get("req_value", "")).strip(),
+                    "req_unit": str(r.get("req_unit", "")).strip(),
+                    "op": r.get("op", "manual"),
+                    "cite": cite,
+                })
+            job["chunks_processed"] = i + 1
+
+        summary = {"project_period": "", "project_budget": "", "purpose": "", "contact": {}}
+        if chunks:
+            messages = [
+                {"role": "system", "content": _BIDRADAR_EXTRACT_SUMMARY_PROMPT},
+                {"role": "user", "content": f"[문서 조각]\n{chunks[0]}"},
+            ]
+            with lock:
+                result = llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=400)
+            raw = result["choices"][0]["message"]["content"]
+            usage = result.get("usage", {})
+            total_in += usage.get("prompt_tokens", 0)
+            total_out += usage.get("completion_tokens", 0)
+            try:
+                summary_data = json.loads(raw)
+                if isinstance(summary_data, dict):
+                    summary.update(summary_data)
+            except json.JSONDecodeError:
+                pass
+
+        latency_ms = round((time.perf_counter() - start) * 1000)
+        job.update({
+            "status": "done",
+            "output": {"requirements": all_requirements, "summary": summary},
+            "model": "Qwen3-4B-Instruct-2507-Q4_K_M" + ("-gpu" if use_gpu else "-cpu"),
+            "chunks_processed": len(chunks),
+            "tokens_in": total_in, "tokens_out": total_out, "latency_ms": latency_ms,
+        })
+        _log_bidradar_call("extract-requirements", job["trace_id"], True, latency_ms=latency_ms, tokens_in=total_in, tokens_out=total_out)
+    except Exception as exc:  # noqa: BLE001 — 조용한 실패 금지
+        latency_ms = round((time.perf_counter() - start) * 1000)
+        job.update({"status": "error", "error": {"code": "inference_failed", "message": str(exc)}, "latency_ms": latency_ms})
+        _log_bidradar_call("extract-requirements", job["trace_id"], False, latency_ms=latency_ms, error_code="inference_failed")
+    finally:
+        if use_gpu:
+            _gpu_llm_busy = False
+
+
+@app.post("/v1/extract-requirements")
+async def bidradar_extract_requirements(request: Request):
+    """유스케이스 A(v1) — 청크 순차 처리 특성상 동기 응답은 중앙값 문서(15청크) 기준
+    수 분이 걸려 "상세페이지 열자마자 미리보기"와 맞지 않는다(BidRadar 질의
+    2026-09-20). job_id를 즉시 반환하고 GET /v1/extract-requirements/{job_id}로
+    폴링하는 방식으로 전환했다 — AI튜터 학습의 job_status 폴링과 같은 패턴."""
+    auth_error = _bidradar_check_auth(request)
+    if auth_error is not None:
+        return auth_error
+
+    payload = await request.json()
+    input_text = (payload.get("input_text") or "").strip()
+    trace_id = payload.get("trace_id", "")
+    if not input_text:
+        _log_bidradar_call("extract-requirements", trace_id, False, error_code="empty_input")
+        return JSONResponse({"error": {"code": "empty_input", "message": "input_text가 비어있습니다"}, "trace_id": trace_id}, status_code=400)
+    if _edu_job_status().get("status") == "running":
+        return JSONResponse({"error": {"code": "gpu_busy", "message": "AI튜터 학습이 진행 중입니다. 잠시 후 다시 시도해주세요."}, "trace_id": trace_id}, status_code=409)
+
+    job_id = uuid.uuid4().hex
+    _bidradar_jobs[job_id] = {
+        "status": "queued", "trace_id": trace_id,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "chunks_processed": 0, "chunks_total": None,
+    }
+    if len(_bidradar_jobs) > _MAX_BIDRADAR_JOBS:
+        oldest = min(_bidradar_jobs, key=lambda k: _bidradar_jobs[k]["created_at"])
+        del _bidradar_jobs[oldest]
+
+    def _start():
+        _bidradar_jobs[job_id]["status"] = "running"
+        _bidradar_extract_job_worker(job_id, input_text)
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _start)
+
+    return JSONResponse({"job_id": job_id, "status": "queued", "trace_id": trace_id}, status_code=202)
+
+
+@app.get("/v1/extract-requirements/{job_id}")
+def bidradar_extract_requirements_status(job_id: str, request: Request):
+    """폴링용 — BidRadar가 job_id로 완료 여부·진행률(chunks_processed/chunks_total)을
+    확인한다. status: queued|running|done|error."""
+    auth_error = _bidradar_check_auth(request)
+    if auth_error is not None:
+        return auth_error
+    job = _bidradar_jobs.get(job_id)
+    if job is None:
+        return JSONResponse({"error": {"code": "job_not_found", "message": "존재하지 않거나 만료된 job_id입니다"}}, status_code=404)
+    return JSONResponse(job)

@@ -55,7 +55,7 @@
   .page-header select { width: auto; min-width: 220px; }
 
   .sim-layout { display: grid; grid-template-columns: 420px 1fr; gap: 20px; align-items: start; }
-  #sensor-cards { display: flex; flex-direction: column; gap: 8px; }
+  #sensor-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
   .sensor-card.compact { padding: 10px 14px; margin-bottom: 0; }
   .sensor-card.compact .row1 { display: flex; align-items: center; gap: 8px; }
   .sensor-card.compact .chk { display: flex; align-items: center; margin: 0; width: auto; }
@@ -91,7 +91,18 @@
 
   @media (max-width: 900px) {
     .sim-layout { grid-template-columns: 1fr; }
+    .control-layout { grid-template-columns: 1fr; }
   }
+
+  .control-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+  .site-grid-2x2 { grid-template-columns: repeat(2, 1fr) !important; }
+  .manual-slots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 14px; }
+  .slot-card { padding: 12px 14px; }
+  .slot-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .slot-header select { width: auto; flex: 1 1 auto; font-size: 0.82rem; padding: 5px 8px; }
+  .slot-run-btn { width: 100%; margin-top: 0; }
+  .slot-equipment { margin-top: 10px; }
+  .slot-result:empty::before { content: "아직 실행하지 않음"; color: var(--muted); font-size: 0.85rem; }
 
   .site-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
   .site-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
@@ -115,9 +126,16 @@
     <a href="/education">교육 자료</a>
     <a href="/">MLOps 파이프라인</a>
     <a href="/control-room">산업안전 통합관제</a>
-    <a href="/edu-admin">스마트교육 콘텐츠</a>
+    <a href="/edu-admin">AI 튜터</a>
+    <a href="/ai-debate">AI 토론</a>
+    <a href="/bidradar">BidRadar 연동</a>
   </nav>
   <span class="muted" style="margin-left:auto; color: var(--muted); font-size:0.85rem;">현장 안전 오프라인 어시스턴트 · 교육용 데모</span>
+  <nav>
+    <a href="http://thingx.grib-iot.com:28082/" target="_blank" rel="noopener">MLflow</a>
+    <a href="http://thingx.grib-iot.com:28083/" target="_blank" rel="noopener">Prometheus</a>
+    <a href="http://thingx.grib-iot.com:28084/" target="_blank" rel="noopener">Grafana</a>
+  </nav>
 </header>
 <main>
 {% block content %}{% endblock %}

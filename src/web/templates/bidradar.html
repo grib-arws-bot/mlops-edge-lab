@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}BidRadar 연동 | MLOps-Edge-Lab{% endblock %}
+{% block content %}
+<style>
+  .bidradar-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .endpoint-card .big-num { font-size: 1.8rem; font-weight: 700; margin: 2px 0; }
+  .endpoint-card code { font-size: 0.78rem; color: var(--muted); }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 0.8rem; }
+  .bar-track { flex: 1; height: 14px; background: #0c0e12; border-radius: 4px; overflow: hidden; display: flex; border: 1px solid var(--border); }
+  .bar-ok { background: var(--normal); }
+  .bar-fail { background: var(--danger); }
+  .log-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }
+  .log-table th, .log-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+  .log-table th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; }
+  .endpoint-tag { font-family: monospace; font-size: 0.76rem; padding: 1px 6px; border-radius: 4px; background: rgba(79,140,255,0.15); color: var(--accent); }
+  .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--normal); margin-right: 6px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+</style>
+
+<div class="page-header">
+  <div>
+    <h1>BidRadar 연동</h1>
+    <h2 style="margin-bottom:0;"><span class="live-dot"></span>이 페이지는 에뮬레이션이 아니라, <code>/v1/*</code> 엔드포인트가 실제로 받은 BidRadar 호출 기록입니다(서버 재시작 전까지 유지).</h2>
+  </div>
+</div>
+
+<div class="bidradar-cards" id="endpoint-cards"></div>
+
+<div class="card" style="margin-top:16px;">
+  <strong>최근 호출 기록</strong>
+  <div class="why">최신 50건, 5초마다 자동 갱신됩니다.</div>
+  <div id="log-area" style="margin-top:8px;"></div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+const ENDPOINT_LABELS = {
+  "classify-doc": "C · 첨부문서 분류 (/v1/classify-doc)",
+  "classify-topic": "B · 시맨틱 필터 (/v1/classify-topic)",
+  "extract-requirements": "A · 요구사항 추출 (/v1/extract-requirements)",
+};
+const ENDPOINT_ORDER = ["classify-doc", "classify-topic", "extract-requirements"];
+
+function renderCards(endpoints) {
+  const area = document.getElementById('endpoint-cards');
+  area.innerHTML = ENDPOINT_ORDER.map(ep => {
+    const s = endpoints[ep] || {total: 0, success: 0, failed: 0, avg_latency_ms: null, total_tokens_in: 0, total_tokens_out: 0};
+    const okPct = s.total ? Math.round((s.success / s.total) * 100) : 0;
+    const barHtml = s.total
+      ? `<div class="bar-row"><div class="bar-track"><div class="bar-ok" style="width:${okPct}%;"></div><div class="bar-fail" style="width:${100-okPct}%;"></div></div></div>`
+      : '<div class="stat">아직 호출 기록이 없습니다</div>';
+    return `
+      <div class="card endpoint-card">
+        <strong>${escapeHtml(ENDPOINT_LABELS[ep])}</strong>
+        <div class="big-num">${s.total}<span class="stat" style="display:inline; font-size:0.9rem;"> 건</span></div>
+        <div class="stat">성공 ${s.success} · 실패 ${s.failed}</div>
+        ${barHtml}
+        <div class="stat" style="margin-top:6px;">평균 지연시간: ${s.avg_latency_ms != null ? s.avg_latency_ms + 'ms' : '-'}</div>
+        <div class="stat">누적 토큰: 입력 ${s.total_tokens_in} · 출력 ${s.total_tokens_out}</div>
+      </div>`;
+  }).join('');
+}
+
+function renderLog(recent) {
+  const area = document.getElementById('log-area');
+  if (!recent.length) {
+    area.innerHTML = '<div class="stat">아직 호출 기록이 없습니다 — BidRadar가 실제로 호출하면 여기 표시됩니다.</div>';
+    return;
+  }
+  area.innerHTML = `
+    <table class="log-table">
+      <thead><tr><th>시각</th><th>엔드포인트</th><th>결과</th><th>지연시간</th><th>토큰(입/출)</th><th>trace_id</th></tr></thead>
+      <tbody>
+        ${recent.map(c => `
+          <tr>
+            <td>${escapeHtml(c.at)}</td>
+            <td><span class="endpoint-tag">${escapeHtml(c.endpoint)}</span></td>
+            <td><span class="severity ${c.success ? '정상' : '위험'}">${c.success ? '성공' : (c.error_code || '실패')}</span></td>
+            <td>${c.latency_ms}ms</td>
+            <td>${c.tokens_in}/${c.tokens_out}</td>
+            <td class="stat" style="display:table-cell;">${escapeHtml(c.trace_id)}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+async function refreshBidradarStats() {
+  try {
+    const res = await fetch('/api/bidradar/stats');
+    const data = await res.json();
+    renderCards(data.endpoints);
+    renderLog(data.recent);
+  } catch (e) {
+    // 폴링 실패는 조용히 넘어간다 — 다음 주기에 다시 시도
+  }
+}
+
+refreshBidradarStats();
+setInterval(refreshBidradarStats, 5000);
+</script>
+{% endblock %}

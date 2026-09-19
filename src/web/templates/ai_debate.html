@@ -1,0 +1,339 @@
+{% extends "base.html" %}
+{% block title %}AI 토론 | MLOps-Edge-Lab{% endblock %}
+{% block content %}
+<style>
+  .debate-layout { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 1200px) { .debate-layout { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 640px) { .debate-layout { grid-template-columns: 1fr; } }
+  .debate-stage-card { display: flex; flex-direction: column; }
+  .debate-team-card { border-left: 3px solid var(--accent); margin-bottom: 10px; }
+  .debate-student { padding: 8px 0; border-bottom: 1px dashed var(--border); font-size: 0.85rem; }
+  .debate-student:last-child { border-bottom: none; }
+  .debate-student .name { font-weight: 600; margin-right: 6px; }
+  .team-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; background: rgba(79, 140, 255, 0.18); color: var(--accent); }
+  .opinion-arrow { color: var(--muted); margin: 0 6px; }
+  .moved-badge { color: var(--caution); font-weight: 700; }
+  .ai-generated-note { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; background: rgba(210, 153, 34, 0.18); color: var(--llm); margin-left: 8px; }
+  .sankey-label { font-size: 10px; fill: var(--muted); }
+  .sankey-count { font-size: 10px; fill: var(--ink, var(--text)); }
+  .sankey-legend { display: flex; gap: 14px; margin-top: 6px; font-size: 0.78rem; color: var(--muted); }
+  .sankey-legend span.dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+</style>
+
+<div class="page-header">
+  <div>
+    <h1>AI 토론</h1>
+    <h2 style="margin-bottom:0;">키워드나 주제를 주면 학생 의견을 자동 생성하고(에뮬레이션), 임베딩 유사도로 균등하게 팀을 나눠 근거자료를 준 뒤 토론 전/후 의견 변화까지 보여줍니다</h2>
+  </div>
+  <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+    <label style="margin:0; color:var(--muted); font-size:0.85rem;">학교급</label>
+    <select id="school-level-select" style="width:auto; min-width:120px;">
+      {% for lv in school_levels %}
+      <option value="{{ lv }}" {% if lv == selected_school_level %}selected{% endif %}>{{ lv }}</option>
+      {% endfor %}
+    </select>
+    <label style="margin:0; color:var(--muted); font-size:0.85rem;">과목</label>
+    <select id="subject-select" style="width:auto; min-width:120px;">
+      {% for subj in subjects %}
+      <option value="{{ subj }}" {% if subj == selected_subject %}selected{% endif %}>{{ subj }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+{% if not rag_available %}
+<div class="stat" style="margin-bottom:10px;">⚠️ RAG 인덱스가 아직 없습니다 — 토론 자료(근거)를 만들 수 없습니다.</div>
+{% endif %}
+
+<div class="debate-layout">
+  <div class="card debate-stage-card">
+    <strong>1. 주제 · 의견</strong>
+    <div class="why">키워드로 균형 잡힌 주제를 만들거나 직접 입력하세요. "학생 의견 생성"은 전부 AI 에뮬레이션입니다(실제 학생 데이터 아님).</div>
+    <label>키워드로 자동 생성</label>
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="keyword-input" placeholder="예: 환경 오염 요인" style="flex:1;">
+      <button type="button" id="gen-topic-btn" style="margin-top:0; white-space:nowrap;">주제 생성</button>
+    </div>
+    <label>토론 주제(직접 입력 가능)</label>
+    <input type="text" id="topic-input" placeholder="예: 우리나라 환경에 악영향을 주는 가장 중요한 원인은 무엇일까요?">
+    <label>에뮬레이션 학생 수</label>
+    <input type="number" id="num-students-input" value="10" min="4" max="20" style="max-width:120px;">
+    <button type="button" id="gen-opinions-btn" style="margin-top:16px;">학생 의견 생성</button>
+    <div id="opinions-status" class="stat" style="margin-top:8px;"></div>
+    <div id="opinions-list" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card debate-stage-card">
+    <strong>2. 토론팀 배정</strong>
+    <div class="why">팀 수를 정하면 의견을 벡터로 바꿔 최대한 균등하게 묶습니다(임베딩+k-means, LLM은 팀 이름만 붙입니다). "재배치"로 다시 묶어볼 수 있습니다.</div>
+    <label>팀 수</label>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <input type="number" id="team-count-input" value="3" min="2" max="6" style="max-width:100px;">
+      <button type="button" id="assign-teams-btn" style="margin-top:0;">팀 배정</button>
+    </div>
+    <button type="button" id="reassign-teams-btn" style="margin-top:8px; display:none; width:100%;">🔀 재배치</button>
+    <div id="teams-status" class="stat" style="margin-top:8px;"></div>
+    <div id="teams-area" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card debate-stage-card">
+    <strong>3. 토론 진행</strong>
+    <div class="why">각 팀은 받은 근거자료를 참고해 토론했다고 가정합니다. 아래 버튼을 누르면 같은 에뮬레이션 학생들이 토론 후 의견을 다시 냅니다.</div>
+    <button type="button" id="conclude-btn">토론 종료 → 의견 다시 수집</button>
+    <div id="conclude-status" class="stat" style="margin-top:8px;"></div>
+    <div id="students-compare-area" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card debate-stage-card">
+    <strong>4. 토론 결과</strong>
+    <div class="why">왼쪽(토론 전) → 오른쪽(토론 후) 팀 흐름입니다 — 굵기가 인원 수, 초록 띠는 유지, 주황 띠는 다른 팀으로 이동을 나타냅니다.</div>
+    <div id="summary-line" class="stat" style="font-weight:600; margin-top:8px;"></div>
+    <div id="summary-text" style="margin-top:8px;"></div>
+    <div id="graph-area" style="margin-top:12px; overflow-x:auto;"></div>
+    <div class="sankey-legend"><span><span class="dot" style="background:var(--normal);"></span>유지</span><span><span class="dot" style="background:var(--caution);"></span>이동</span></div>
+  </div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function currentSchoolLevel() { return document.getElementById('school-level-select').value; }
+function currentSubject() { return document.getElementById('subject-select').value; }
+
+// AI 토론 세션 상태는 서버에 저장하지 않고 이 페이지 변수에만 들고 있는다(로그인·
+// 세션 관리가 없는 데모라 가장 단순한 방식) — 각 단계 호출 시 필요한 부분만 그대로
+// 서버에 다시 보낸다(완전 무상태 API).
+let debateTopic = null;
+let debateStudents = null;
+let debateTeams = null;
+let teamSeed = 0;
+
+document.getElementById('gen-topic-btn').addEventListener('click', async () => {
+  const keyword = document.getElementById('keyword-input').value.trim();
+  if (!keyword) { alert('키워드를 입력하세요.'); return; }
+  const btn = document.getElementById('gen-topic-btn');
+  btn.disabled = true;
+  const statusEl = document.getElementById('opinions-status');
+  statusEl.textContent = '↺ 주제 생성 중...';
+  try {
+    const res = await fetch('/api/edu-admin/debate/topic', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({keyword}),
+    });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || '주제 생성 실패'; return; }
+    document.getElementById('topic-input').value = data.topic;
+    statusEl.textContent = '';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderOpinions(students) {
+  const area = document.getElementById('opinions-list');
+  area.innerHTML = `<div class="stat">AI가 생성한 학생 ${students.length}명<span class="ai-generated-note">⚠ AI 에뮬레이션</span></div>` +
+    students.map(s => `
+      <div class="debate-student">
+        <span class="name">${escapeHtml(s.name)}</span>
+        <div class="stat">${escapeHtml(s.opinion)}</div>
+      </div>`).join('');
+}
+
+document.getElementById('gen-opinions-btn').addEventListener('click', async () => {
+  const topic = document.getElementById('topic-input').value.trim();
+  if (!topic) { alert('토론 주제를 입력하거나 키워드로 먼저 생성하세요.'); return; }
+  const numStudents = parseInt(document.getElementById('num-students-input').value, 10) || 10;
+
+  const btn = document.getElementById('gen-opinions-btn');
+  btn.disabled = true;
+  const statusEl = document.getElementById('opinions-status');
+  statusEl.textContent = '↺ 학생 의견 생성 중... (수십 초 소요)';
+  document.getElementById('teams-area').innerHTML = '';
+  document.getElementById('teams-status').textContent = '';
+  document.getElementById('students-compare-area').innerHTML = '';
+  document.getElementById('graph-area').innerHTML = '';
+  document.getElementById('summary-line').textContent = '';
+  document.getElementById('summary-text').textContent = '';
+  document.getElementById('reassign-teams-btn').style.display = 'none';
+
+  try {
+    const res = await fetch('/api/edu-admin/debate/opinions', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({topic, num_students: numStudents}),
+    });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || '학생 의견 생성 실패'; return; }
+
+    debateTopic = data.topic;
+    debateStudents = data.students;
+    debateTeams = null;
+    teamSeed = 0;
+    statusEl.textContent = `완료 — 학생 ${data.students.length}명`;
+    renderOpinions(data.students);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderTeams(teams) {
+  const area = document.getElementById('teams-area');
+  area.innerHTML = teams.map(t => {
+    const materialsHtml = t.materials.length
+      ? t.materials.map(m => `<div class="stat">· ${escapeHtml(m.title)} (score=${m.score})</div>`).join('')
+      : '<div class="stat" style="color:var(--danger);">⚠ 이 팀에 대한 근거 자료가 부족합니다.</div>';
+    return `
+      <div class="card debate-team-card">
+        <strong><span class="team-badge">${escapeHtml(t.label)}</span> · ${t.student_ids.length}명</strong>
+        <div class="stat" style="margin-top:8px; font-weight:600;">참고 자료</div>
+        ${materialsHtml}
+      </div>`;
+  }).join('');
+}
+
+async function runAssignTeams(seed) {
+  if (!debateStudents) { alert('먼저 학생 의견을 생성하세요.'); return; }
+  const teamCount = parseInt(document.getElementById('team-count-input').value, 10) || 3;
+  const statusEl = document.getElementById('teams-status');
+  statusEl.textContent = '↺ 팀 배정 중... (수십 초 소요)';
+  document.getElementById('students-compare-area').innerHTML = '';
+  document.getElementById('graph-area').innerHTML = '';
+  document.getElementById('summary-line').textContent = '';
+  document.getElementById('summary-text').textContent = '';
+
+  const res = await fetch('/api/edu-admin/debate/teams', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      topic: debateTopic, students: debateStudents, team_count: teamCount, seed,
+      school_level: currentSchoolLevel(), subject: currentSubject(),
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) { statusEl.textContent = data.error || '팀 배정 실패'; return; }
+
+  debateTeams = data.teams;
+  teamSeed = seed;
+  statusEl.textContent = `완료 — 팀 ${data.teams.length}개`;
+  renderTeams(data.teams);
+  document.getElementById('reassign-teams-btn').style.display = 'block';
+}
+
+document.getElementById('assign-teams-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('assign-teams-btn');
+  btn.disabled = true;
+  try { await runAssignTeams(0); } finally { btn.disabled = false; }
+});
+
+document.getElementById('reassign-teams-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('reassign-teams-btn');
+  btn.disabled = true;
+  try { await runAssignTeams(teamSeed + 1); } finally { btn.disabled = false; }
+});
+
+function renderCompare(students) {
+  const area = document.getElementById('students-compare-area');
+  area.innerHTML = students.map(s => `
+    <div class="debate-student">
+      <span class="name">${escapeHtml(s.name)}</span>
+      <span class="team-badge">${escapeHtml(s.team_before)}</span>
+      ${!s.stayed ? `<span class="opinion-arrow">→</span><span class="team-badge">${escapeHtml(s.team_after)}</span><span class="moved-badge"> 이동</span>` : '<span class="stat" style="display:inline;"> (유지)</span>'}
+      <div class="stat" style="margin-top:4px;">전: ${escapeHtml(s.opinion)}</div>
+      <div class="stat">후: ${escapeHtml(s.opinion_after)}</div>
+    </div>`).join('');
+}
+
+// 각 의견별(학생별) 전/후 변화를 팀 간 흐름(Sankey류 다이어그램)으로 보여준다 —
+// 사용자 지적(2026-09-20): 전환 행렬은 팀 개수가 늘어나면 칸이 N² 로 늘어 읽기
+// 어려워진다. 흐름 그래프는 팀이 늘어도 세로 길이만 늘어나 훨씬 잘 읽힌다. 외부
+// 차트 라이브러리 없이(이 프로젝트 원칙 — 빌드 도구 없는 순수 HTML/JS) 순수 SVG로
+// 직접 그린다.
+function renderSankey(students, teamLabels) {
+  const boxW = 12, colGap = 260, leftX = 90, topPad = 14, rowGap = 6;
+  const pxPerStudent = 14;
+
+  const beforeCount = {}, afterCount = {};
+  teamLabels.forEach(t => { beforeCount[t] = 0; afterCount[t] = 0; });
+  students.forEach(s => {
+    if (s.team_before in beforeCount) beforeCount[s.team_before]++;
+    if (s.team_after in afterCount) afterCount[s.team_after]++;
+  });
+
+  let yLeft = {}, cursor = topPad;
+  teamLabels.forEach(t => { yLeft[t] = cursor; cursor += Math.max(beforeCount[t], 1) * pxPerStudent + rowGap; });
+  let yRight = {}; cursor = topPad;
+  teamLabels.forEach(t => { yRight[t] = cursor; cursor += Math.max(afterCount[t], 1) * pxPerStudent + rowGap; });
+  const totalH = Math.max(cursor, topPad) + 10;
+  const rightX = leftX + colGap;
+  const W = rightX + boxW + 140;
+
+  const flowsByFrom = {};
+  teamLabels.forEach(from => { flowsByFrom[from] = []; });
+  teamLabels.forEach(from => {
+    teamLabels.forEach(to => {
+      const count = students.filter(s => s.team_before === from && s.team_after === to).length;
+      if (count > 0) flowsByFrom[from].push({ to, count });
+    });
+  });
+
+  let svg = `<svg viewBox="0 0 ${W} ${totalH}" width="100%" style="max-width:${W}px; height:auto;">`;
+
+  // 팀 상자 + 라벨
+  teamLabels.forEach(t => {
+    const hL = Math.max(beforeCount[t], 1) * pxPerStudent;
+    const hR = Math.max(afterCount[t], 1) * pxPerStudent;
+    svg += `<rect x="${leftX}" y="${yLeft[t]}" width="${boxW}" height="${hL}" fill="var(--accent)" rx="2"/>`;
+    svg += `<rect x="${rightX}" y="${yRight[t]}" width="${boxW}" height="${hR}" fill="var(--accent)" rx="2"/>`;
+    svg += `<text class="sankey-label" x="${leftX - 8}" y="${yLeft[t] + hL / 2 + 3}" text-anchor="end">${escapeHtml(t)} (${beforeCount[t]})</text>`;
+    svg += `<text class="sankey-label" x="${rightX + boxW + 8}" y="${yRight[t] + hR / 2 + 3}">${escapeHtml(t)} (${afterCount[t]})</text>`;
+  });
+
+  // 흐름 띠 — from 상자 안에서 위에서부터 순서대로 잘라 쓰고(leftCursor), to 상자도
+  // 같은 방식으로 채워간다(rightCursor). from===to(유지)를 항상 먼저 그려서 대체로
+  // 위쪽에 정렬되게 한다 — 흐름이 서로 덜 겹쳐 더 읽기 쉽다.
+  const leftCursor = { ...yLeft }, rightCursor = { ...yRight };
+  teamLabels.forEach(from => {
+    const flows = flowsByFrom[from].slice().sort((a, b) => (a.to === from ? -1 : b.to === from ? 1 : 0));
+    flows.forEach(({ to, count }) => {
+      const h = count * pxPerStudent;
+      const y0 = leftCursor[from], y1 = rightCursor[to];
+      leftCursor[from] += h; rightCursor[to] += h;
+      const x0 = leftX + boxW, x1 = rightX;
+      const midX = (x0 + x1) / 2;
+      const color = from === to ? 'var(--normal)' : 'var(--caution)';
+      svg += `<path d="M${x0},${y0} C${midX},${y0} ${midX},${y1} ${x1},${y1} L${x1},${y1 + h} C${midX},${y1 + h} ${midX},${y0 + h} ${x0},${y0 + h} Z" fill="${color}" opacity="0.4"/>`;
+      if (h >= 12) svg += `<text class="sankey-count" x="${midX}" y="${(y0 + y1) / 2 + h / 2}" text-anchor="middle">${count}</text>`;
+    });
+  });
+
+  svg += '</svg>';
+  return svg;
+}
+
+document.getElementById('conclude-btn').addEventListener('click', async () => {
+  if (!debateTeams) { alert('먼저 팀을 배정하세요.'); return; }
+  const btn = document.getElementById('conclude-btn');
+  btn.disabled = true;
+  const statusEl = document.getElementById('conclude-status');
+  statusEl.textContent = '↺ 토론 후 의견 수집 중... (수십 초 소요)';
+
+  try {
+    const res = await fetch('/api/edu-admin/debate/conclude', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({topic: debateTopic, students: debateStudents, teams: debateTeams}),
+    });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || '실패'; return; }
+
+    statusEl.textContent = `완료 — 총 ${data.summary.total}명 중 ${data.summary.moved}명 팀 이동`;
+    renderCompare(data.students);
+
+    document.getElementById('summary-line').textContent =
+      `유지 ${data.summary.stayed}명 · 이동 ${data.summary.moved}명 (총 ${data.summary.total}명)`;
+    document.getElementById('summary-text').textContent = data.summary_text || '';
+    const teamLabels = debateTeams.map(t => t.label);
+    document.getElementById('graph-area').innerHTML = renderSankey(data.students, teamLabels);
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+{% endblock %}
