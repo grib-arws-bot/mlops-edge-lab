@@ -52,6 +52,7 @@ function announceAlert(site, narrative) {
   for (let i = 0; i < 3; i++) {
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = 'ko-KR';
+    utter.rate = 1.2;  // 사용자 요청(2026-09-19) — 기본(1.0)보다 20% 빠르게
     window.speechSynthesis.speak(utter);
   }
 }
@@ -94,26 +95,29 @@ async function refreshControlRoom() {
             '<div class="equip-item equip-' + e.status + '"><span class="equip-dot"></span>' + escapeHtml(e.equipment) + '<span class="equip-status">' + escapeHtml(e.status) + '</span></div>'
           ).join('') + '</div>'
         : '';
-      // 단계별 타임스탬프(사용자 요청) — 센서 변경 → 장비 동작 → LLM 안내 완성 순서로.
+      // 단계별 표시(사용자 요청) — 장비 조치(규칙)는 즉시 보이고, LLM 안내 문구는
+      // pending 동안 "생성 중"으로 표시하다가 완성되면 채워진다.
+      const narrativeHtml = s.alert.pending
+        ? '<div class="feed-narrative stat">⏳ LLM이 안내 문구를 작성하는 중...</div>'
+        : '<div class="feed-narrative">' + escapeHtml(s.alert.narrative) + '</div>';
       const equipTime = eq.length ? isoTime(eq[0].at) : s.alert.sensor_changed_at;
-      const timelineHtml =
-        '<div class="stat" style="margin: 4px 0 0;">⏱ ' +
-        (s.alert.sensor_changed_at || '-') + ' 감지 → ' +
-        equipTime + ' 장비 동작 → ' +
-        s.alert.logged_at + ' 안내 완성 (+' + (s.alert.elapsed ?? '?') + 's, ' + escapeHtml(s.alert.edge_label || '') + ')' +
-        '</div>';
+      const timelineHtml = s.alert.pending
+        ? '<div class="stat" style="margin: 4px 0 0;">⏱ ' + (s.alert.sensor_changed_at || '-') + ' 감지 → ' + equipTime + ' 장비 동작 → 안내 작성 중</div>'
+        : '<div class="stat" style="margin: 4px 0 0;">⏱ ' +
+          (s.alert.sensor_changed_at || '-') + ' 감지 → ' +
+          equipTime + ' 장비 동작 → ' +
+          s.alert.logged_at + ' 안내 완성 (+' + (s.alert.elapsed ?? '?') + 's, ' + escapeHtml(s.alert.edge_label || '') + ')' +
+          '</div>';
       alertBox.className = 'site-alert alert-' + s.alert.severity;
       alertBox.innerHTML =
         '<div class="feed-head"><span class="severity ' + s.alert.severity + '">' + s.alert.severity + '</span></div>' +
-        equipHtml +
-        '<div class="feed-narrative">' + escapeHtml(s.alert.narrative) + '</div>' +
-        timelineHtml;
+        equipHtml + narrativeHtml + timelineHtml;
       alertBox.style.display = 'block';
 
-      if (document.getElementById('tts_enabled').checked && announcedAt[s.name] !== s.alert.logged_at) {
+      if (!s.alert.pending && document.getElementById('tts_enabled').checked && announcedAt[s.name] !== s.alert.logged_at) {
         announceAlert(s.name, s.alert.narrative);
       }
-      announcedAt[s.name] = s.alert.logged_at;
+      if (!s.alert.pending) announcedAt[s.name] = s.alert.logged_at;
     } else {
       alertBox.style.display = 'none';
       alertBox.innerHTML = '';

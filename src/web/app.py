@@ -775,6 +775,20 @@ def _run_control_room_narrative(event: dict) -> dict:
     return _run_events_emulated([event], profile["cores"], profile["mem_gb"], profile.get("gpu", False))[0]
 
 
+def _set_site_alert_pending(site: str, substance: str, severity: str, equipment_status: list[dict], sensor_changed_at: str) -> None:
+    """LLM 응답을 기다리는 동안 먼저 보여줄 상태(사용자 요청, 2026-09-19 — /simulate처럼
+    단계별로 보이게). preview()의 equipment_status는 실제 tools.actuate_equipment를 부르지
+    않는 순수 미리보기라 부작용이 없다(/simulate의 "①즉시 반응"과 같은 패턴) — 실제 실행
+    기록은 이후 _set_site_alert가 run_agent 결과로 덮어쓴다."""
+    _control_room_state[site]["alert"] = {
+        "substance": substance, "severity": severity, "narrative": None,
+        "equipment": equipment_status, "logged_at": None,
+        "sensor_changed_at": sensor_changed_at, "elapsed": None,
+        "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])["label"],
+        "pending": True,
+    }
+
+
 def _set_site_alert(site: str, substance: str, severity: str, result: dict, elapsed: float, sensor_changed_at: str) -> None:
     """단계별 타임스탬프(사용자 요청, 의사결정_로그 61번)를 전부 남긴다 — 센서 변경 시점은
     여기서 직접 넘겨받고, 장비 조치 시점은 각 equipment_status 항목이 이미 갖고 있는
@@ -784,6 +798,7 @@ def _set_site_alert(site: str, substance: str, severity: str, result: dict, elap
         "equipment": result.get("equipment_status", []), "logged_at": _now_hms(),
         "sensor_changed_at": sensor_changed_at,
         "elapsed": elapsed, "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])["label"],
+        "pending": False,
     }
 
 
@@ -815,6 +830,10 @@ async def _control_room_loop() -> None:
             METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=severity).inc()
 
             if severity != "정상":
+                # 규칙(장비 조치)은 즉시 보여주고, LLM 문구는 나중에 채운다(사용자 요청,
+                # /simulate의 단계별 표시와 동일한 원칙 — "판정은 즉시, LLM은 나중"이라는
+                # 이 프로젝트 전체의 설계를 카드 화면에서도 실제로 보이게 함).
+                _set_site_alert_pending(site, substance, severity, preview_result["equipment_status"], sensor_changed_at)
                 start = time.perf_counter()
                 result = await loop.run_in_executor(None, _run_control_room_narrative, event)
                 elapsed = round(time.perf_counter() - start, 2)
