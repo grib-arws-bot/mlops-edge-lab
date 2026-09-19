@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import urllib.error
+import urllib.request
 import random
 import subprocess
 import sys
@@ -916,6 +918,7 @@ def edu_admin(request: Request):
             "sources": sources,
             "rag_available": _state.get("edu_index") is not None,
             "finetuned_available": (_ROOT / "experiments" / "edu-social-lora" / "final").exists(),
+            "claude_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
         },
     )
 
@@ -986,6 +989,38 @@ async def edu_admin_ask(request: Request):
             None, query_edu.answer, question, _state["edu_embed_model"], _state["edu_index"], _state["edu_meta"], _state["llm"],
         )
         return JSONResponse({"mode": "rag", **result})
+
+    if mode == "claude":
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            return JSONResponse({"error": "ANTHROPIC_API_KEY가 서버에 설정되지 않았습니다"}, status_code=400)
+
+        def _call_claude() -> str:
+            # RAG·근거 없이 Claude 자체 지식으로만 답하게 한다 — "우리 파이프라인(RAG/
+            # 파인튜닝) 없이 그냥 강력한 범용 모델에 물어보면 어떤가"를 비교하기 위한
+            # 대조군이라, 일부러 근거 자료를 안 준다.
+            body = json.dumps({
+                "model": "claude-sonnet-5",
+                "max_tokens": 400,
+                "system": "당신은 중학교 사회 선생님입니다. 학생 질문에 학생 눈높이로 친절하게 답합니다.",
+                "messages": [{"role": "user", "content": question}],
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages", data=body,
+                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+            return result["content"][0]["text"]
+
+        try:
+            answer = await loop.run_in_executor(None, _call_claude)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            return JSONResponse({"error": f"Claude API 호출 실패({exc.code}): {detail}"}, status_code=502)
+        except Exception as exc:  # noqa: BLE001 — 데모 화면에 원인을 그대로 보여주기 위함
+            return JSONResponse({"error": f"Claude API 호출 실패: {exc}"}, status_code=502)
+        return JSONResponse({"mode": "claude", "answer": answer, "sources": []})
 
     if mode == "finetuned":
         adapter_dir = _ROOT / "experiments" / "edu-social-lora" / "final"

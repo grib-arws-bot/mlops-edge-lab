@@ -1,72 +1,96 @@
 {% extends "base.html" %}
 {% block title %}스마트교육 콘텐츠 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
-<h1>스마트교육 콘텐츠 — 수집·학습 운영 콘솔</h1>
-<h2>공공 API/사이트에서 수집한 콘텐츠 현황을 보고, 어떤 소스로 학습할지 고르고, 학생 입장에서 직접 물어볼 수 있습니다</h2>
+<h1>스마트교육 콘텐츠</h1>
+<h2>좌측은 콘텐츠 수집·학습 운영 콘솔, 우측은 그 결과로 실제 동작하는 AI 튜터입니다</h2>
 
-<div class="card">
-  <strong>수집 현황</strong>
-  <div class="why">체크된 소스만 "학습 시작"에 포함됩니다. 라이선스가 변경을 금지하는 소스(예: 공공누리 3·4유형)는 체크박스가 비활성화됩니다 — RAG 인용에는 계속 쓰이지만 파인튜닝 재료로는 못 씁니다.</div>
-  <table style="width:100%; border-collapse:collapse; margin-top:10px; font-size:0.88rem;">
-    <thead>
-      <tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--border);">
-        <th style="padding:6px 8px;"></th>
-        <th style="padding:6px 8px;">소스</th>
-        <th style="padding:6px 8px;">수집 건수</th>
-        <th style="padding:6px 8px;">최근 수집</th>
-        <th style="padding:6px 8px;">라이선스</th>
-        <th style="padding:6px 8px;">학습 가능</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for s in sources %}
-      <tr style="border-bottom:1px solid var(--border);">
-        <td style="padding:6px 8px;">
-          {% if s.item_count > 0 and s.allows_modification %}
-          <input type="checkbox" class="src-checkbox" value="{{ s.source_id }}">
-          {% else %}
-          <input type="checkbox" disabled title="{{ '수집된 데이터 없음' if s.item_count == 0 else '라이선스상 학습(변경) 금지' }}">
-          {% endif %}
-        </td>
-        <td style="padding:6px 8px;">{{ s.name }}{% if not s.implemented %} <span class="stat" style="display:inline;">(미구현)</span>{% endif %}</td>
-        <td style="padding:6px 8px;">{{ s.item_count }}건</td>
-        <td style="padding:6px 8px; color:var(--muted);">{{ s.last_collected_at or '-' }}</td>
-        <td style="padding:6px 8px; color:var(--muted);">{{ s.license_type }}</td>
-        <td style="padding:6px 8px;">
-          {% if s.item_count == 0 %}<span class="stat" style="display:inline;">-</span>
-          {% elif s.allows_modification %}<span class="severity 정상">가능</span>
-          {% else %}<span class="severity 위험">불가</span>{% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="sim-layout">
+<div class="sim-left">
+  <div class="card">
+    <strong>수집 현황</strong>
+    <div class="why">체크된 소스만 "학습 시작"에 포함됩니다. 라이선스가 변경을 금지하는 소스(예: 공공누리 3·4유형)는 체크박스가 비활성화됩니다 — RAG 인용에는 계속 쓰이지만 파인튜닝 재료로는 못 씁니다.</div>
+    <table style="width:100%; border-collapse:collapse; margin-top:10px; font-size:0.82rem;">
+      <thead>
+        <tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--border);">
+          <th style="padding:6px 4px;"></th>
+          <th style="padding:6px 4px;">소스</th>
+          <th style="padding:6px 4px;">건수</th>
+          <th style="padding:6px 4px;">라이선스</th>
+          <th style="padding:6px 4px;">학습</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in sources %}
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:6px 4px;">
+            {% if s.item_count > 0 and s.allows_modification %}
+            <input type="checkbox" class="src-checkbox" value="{{ s.source_id }}">
+            {% else %}
+            <input type="checkbox" disabled title="{{ '수집된 데이터 없음' if s.item_count == 0 else '라이선스상 학습(변경) 금지' }}">
+            {% endif %}
+          </td>
+          <td style="padding:6px 4px;">{{ s.name }}{% if not s.implemented %} <span class="stat" style="display:inline;">(미구현)</span>{% endif %}</td>
+          <td style="padding:6px 4px;">{{ s.item_count }}건</td>
+          <td style="padding:6px 4px; color:var(--muted);">{{ s.license_type }}</td>
+          <td style="padding:6px 4px;">
+            {% if s.item_count == 0 %}<span class="stat" style="display:inline;">-</span>
+            {% elif s.allows_modification %}<span class="severity 정상">가능</span>
+            {% else %}<span class="severity 위험">불가</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
 
-  <button id="train-btn" style="margin-top:14px;">학습 시작</button>
-  <div id="train-status" class="stat" style="margin-top:8px;"></div>
-</div>
-
-<div class="card">
-  <strong>학생 체험 — 실제로 질문해보기</strong>
-  <div class="why">
-    같은 질문을 두 방식으로 비교할 수 있습니다 — <strong>RAG</strong>는 수집된 자료에서 근거를 찾아 인용하며 답하고, <strong>파인튜닝 단독</strong>은 학습된 어댑터가 근거 없이 바로 답합니다. 오늘 실측 결과 파인튜닝 단독은 구체적 수치·연도를 지어내는 경향이 확인됐습니다 — 그 차이를 직접 확인할 수 있습니다.
-  </div>
-  <label>질문</label>
-  <input type="text" id="question" placeholder="예: 부산광역시의 인구는 얼마인가요?">
-  <div style="display:flex; gap:16px; margin:10px 0;">
-    <label style="display:flex; align-items:center; gap:6px; margin:0;"><input type="radio" name="mode" value="rag" checked style="width:auto;"> RAG (권장)</label>
-    <label style="display:flex; align-items:center; gap:6px; margin:0;"><input type="radio" name="mode" value="finetuned" style="width:auto;" {% if not finetuned_available %}disabled{% endif %}> 파인튜닝 단독{% if not finetuned_available %} (어댑터 없음){% endif %}</label>
-  </div>
-  <button id="ask-btn">질문하기</button>
-
-  <div id="ask-result" style="margin-top:14px; display:none;">
-    <div class="loop-badge" id="ask-mode-badge" style="display:inline-block;"></div>
-    <div class="feed-narrative" id="ask-answer" style="margin-top:8px;"></div>
-    <div id="ask-sources" style="margin-top:8px;"></div>
+    <button id="train-btn" style="margin-top:14px;">학습 시작</button>
+    <div id="train-status" class="stat" style="margin-top:8px;"></div>
   </div>
   {% if not rag_available %}
-  <div class="stat" style="margin-top:10px;">⚠️ RAG 인덱스가 아직 없습니다 — 서버에서 <code>python -m rag.build_edu_index</code> 실행 필요</div>
+  <div class="stat" style="margin-top:6px;">⚠️ RAG 인덱스가 아직 없습니다 — 서버에서 <code>python -m rag.build_edu_index</code> 실행 필요</div>
   {% endif %}
+</div>
+
+<div class="sim-right">
+  <div class="card">
+    <strong>🎓 AI 튜터 — 질의응답 3종 비교</strong>
+    <div class="why">
+      같은 질문을 세 방식으로 각각 실행해서 비교합니다 — <strong>RAG</strong>는 수집된 자료에서 근거를 찾아 인용하고, <strong>파인튜닝 단독</strong>은 근거 없이 바로 답합니다(오늘 실측 결과 구체적 수치·연도를 지어내는 경향 확인됨). <strong>Claude</strong>는 우리 파이프라인 없이 범용 모델 자체 지식으로만 답하는 대조군입니다.
+    </div>
+    <label>질문</label>
+    <input type="text" id="question" placeholder="예: 부산광역시의 인구는 얼마인가요?">
+
+    <div class="ask-buttons" style="display:flex; gap:10px; margin:12px 0; flex-wrap:wrap;">
+      <button type="button" class="ask-btn" data-mode="rag" {% if not rag_available %}disabled{% endif %}>RAG 실행</button>
+      <button type="button" class="ask-btn" data-mode="finetuned" {% if not finetuned_available %}disabled{% endif %}>파인튜닝 실행{% if not finetuned_available %}(어댑터 없음){% endif %}</button>
+      <button type="button" class="ask-btn" data-mode="claude" {% if not claude_available %}disabled{% endif %}>
+        Claude 실행 {% if claude_available %}<span class="tag llm" style="margin-left:4px;">AI비용발생</span>{% else %}(API 키 없음){% endif %}
+      </button>
+    </div>
+
+    <div id="ask-panels" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px;">
+      <div class="ask-panel" data-mode="rag" style="display:none;">
+        <div class="loop-badge ask-mode-badge" style="display:inline-block;">RAG</div>
+        <div class="feed-narrative ask-answer" style="margin-top:8px;"></div>
+        <div class="ask-sources" style="margin-top:8px;"></div>
+      </div>
+      <div class="ask-panel" data-mode="finetuned" style="display:none;">
+        <div class="loop-badge ask-mode-badge" style="display:inline-block;">파인튜닝 단독</div>
+        <div class="feed-narrative ask-answer" style="margin-top:8px;"></div>
+        <div class="ask-sources" style="margin-top:8px;"></div>
+      </div>
+      <div class="ask-panel" data-mode="claude" style="display:none;">
+        <div class="loop-badge ask-mode-badge" style="display:inline-block;">Claude</div>
+        <div class="feed-narrative ask-answer" style="margin-top:8px;"></div>
+        <div class="ask-sources" style="margin-top:8px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>다음 계획(아직 미구현)</strong>
+    <div class="why">관련 퀴즈(근거 기반 출제 + 캐릭터 음성)와 관련 링크(실제 출처 URL + 유튜브 검색 링크)는 설계만 되어 있고 아직 만들지 않았습니다 — 위 3종 비교부터 검증 후 이어서 진행합니다.</div>
+  </div>
+</div>
 </div>
 
 <script>
@@ -117,39 +141,55 @@ trainBtn.addEventListener('click', async () => {
 
 pollJobStatus();
 
-const askBtn = document.getElementById('ask-btn');
-const askResult = document.getElementById('ask-result');
-const askAnswer = document.getElementById('ask-answer');
-const askSources = document.getElementById('ask-sources');
-const askModeBadge = document.getElementById('ask-mode-badge');
+// ── AI 튜터 질의응답 3종 — 각각 독립적으로 실행(사용자 요청, 2026-09-19) ──────
+// 하나의 "비교" 버튼으로 셋을 한꺼번에 부르지 않는 이유: Claude는 실제 비용이
+// 드는 API라, 사용자가 원할 때만 명시적으로 눌러야 한다. RAG/파인튜닝은 무료라
+// 같이 묶어도 되지만, 세 버튼을 통일된 인터랙션으로 두는 게 더 이해하기 쉽다.
+const waitLabel = {
+  rag: 'RAG로 근거 검색 중...',
+  finetuned: '파인튜닝 어댑터 로딩·생성 중(수십 초 소요)...',
+  claude: 'Claude API 호출 중...',
+};
+const doneLabel = {
+  rag: 'RAG 답변 (근거 인용)',
+  finetuned: '파인튜닝 단독 답변 (근거 없음)',
+  claude: 'Claude 답변 (우리 자료 근거 없음, 대조군)',
+};
 
-askBtn.addEventListener('click', async () => {
-  const question = document.getElementById('question').value.trim();
-  if (!question) { alert('질문을 입력하세요.'); return; }
-  const mode = document.querySelector('input[name="mode"]:checked').value;
+document.querySelectorAll('.ask-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const mode = btn.dataset.mode;
+    const question = document.getElementById('question').value.trim();
+    if (!question) { alert('질문을 입력하세요.'); return; }
 
-  askBtn.disabled = true;
-  askResult.style.display = 'block';
-  askModeBadge.textContent = mode === 'rag' ? '↺ RAG로 근거 검색 중...' : '↺ 파인튜닝 어댑터 로딩·생성 중(수십 초 소요)...';
-  askAnswer.textContent = '';
-  askSources.innerHTML = '';
+    const panel = document.querySelector(`.ask-panel[data-mode="${mode}"]`);
+    const badge = panel.querySelector('.ask-mode-badge');
+    const answerEl = panel.querySelector('.ask-answer');
+    const sourcesEl = panel.querySelector('.ask-sources');
 
-  try {
-    const res = await fetch('/api/edu-admin/ask', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question, mode}),
-    });
-    const data = await res.json();
-    if (!res.ok) { askModeBadge.textContent = '오류'; askAnswer.textContent = data.error || '실패'; return; }
+    btn.disabled = true;
+    panel.style.display = 'block';
+    badge.textContent = '↺ ' + waitLabel[mode];
+    answerEl.textContent = '';
+    sourcesEl.innerHTML = '';
 
-    askModeBadge.textContent = mode === 'rag' ? 'RAG 답변 (근거 인용)' : '파인튜닝 단독 답변 (근거 없음)';
-    askAnswer.textContent = data.answer;
-    if (data.sources && data.sources.length) {
-      askSources.innerHTML = '<div class="stat">참고한 자료:</div>' +
-        data.sources.map(s => `<div class="stat">· ${escapeHtml(s.title)} (score=${s.score})</div>`).join('');
+    try {
+      const res = await fetch('/api/edu-admin/ask', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question, mode}),
+      });
+      const data = await res.json();
+      if (!res.ok) { badge.textContent = '오류'; answerEl.textContent = data.error || '실패'; return; }
+
+      badge.textContent = doneLabel[mode];
+      answerEl.textContent = data.answer;
+      if (data.sources && data.sources.length) {
+        sourcesEl.innerHTML = '<div class="stat">참고한 자료:</div>' +
+          data.sources.map(s => `<div class="stat">· ${escapeHtml(s.title)} (score=${s.score})</div>`).join('');
+      }
+    } finally {
+      btn.disabled = false;
     }
-  } finally {
-    askBtn.disabled = false;
-  }
+  });
 });
 </script>
 {% endblock %}
