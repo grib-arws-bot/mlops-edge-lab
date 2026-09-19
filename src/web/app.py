@@ -2035,6 +2035,25 @@ def _parse_requirements(raw: str) -> list[dict]:
     return [{"category": m.group(1), "req_text": m.group(2), "req_value": "", "req_unit": "", "op": "manual", "cite": m.group(3)} for m in pattern.finditer(raw)]
 
 
+def _dedupe_requirements(requirements: list[dict]) -> list[dict]:
+    """청크 겹침 구간(chunk_text의 overlap=200자)에 걸친 동일 요구사항이 인접한 두
+    청크 양쪽에서 각각 추출돼 중복으로 남는 문제(의사결정_로그 95번에서 실측 확인,
+    "실적"·"인증" 항목이 2번씩). 문장 유사도 기반 중복 제거는 "비슷하지만 다른 두
+    요구사항"을 잘못 하나로 합칠 위험이 있어 일부러 피하고(95번에서 이미 그렇게
+    판단해 보류했었음) — 겹침 구간에서 나온 중복은 원문 자체가 말 그대로 같다는
+    점만 이용해, cite(원문을 그대로 인용해야 하는 필드)를 공백 정규화 후 완전히
+    같을 때만 같은 요구사항으로 보고 먼저 나온 것만 남긴다."""
+    seen: set[str] = set()
+    deduped = []
+    for r in requirements:
+        key = " ".join(r["cite"].split())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    return deduped
+
+
 def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
     """백그라운드 스레드(run_in_executor)에서 실행 — 청크 수만큼 순차 LLM 호출이
     필요해(레이턴시 근본 원인) 동기 응답 대신 job_id를 먼저 돌려주고 여기서 진행한다
@@ -2094,6 +2113,8 @@ def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
                     "cite": cite,
                 })
             job["chunks_processed"] = i + 1
+
+        all_requirements = _dedupe_requirements(all_requirements)
 
         summary = {"project_period": "", "project_budget": "", "purpose": "", "contact": {}}
         if chunks:
