@@ -218,6 +218,38 @@ def _extraction_quality_note() -> str | None:
     return f"품질 재검토 필요: {review}/{total}건 ({review / total:.0%}) — 반복 줄·한글 비율·깨진 문자 기준" if review else f"품질 점검 {total}건 — 재검토 필요 없음"
 
 
+_HEALTH_STATE_PATH = _ROOT / ".health_state.json"
+_ALERTS_LOG_PATH = _ROOT / "logs" / "alerts.log"
+_HEALTH_CHECK_LABELS = {
+    "systemd:mlops-web": "웹 서비스",
+    "systemd:mlops-mlflow": "MLflow",
+    "systemd:mlops-actions-runner": "CI/CD 러너",
+    "http:web": "웹 서비스 응답",
+    "http:mlflow": "MLflow 응답",
+}
+
+
+def _system_status() -> dict:
+    """71번 항목(Alertmanager-lite)이 남긴 두 파일을 그대로 읽어서 보여준다 — 별도
+    저장소나 API 없이, scripts/healthcheck_alert.py가 2분마다 갱신하는 상태 파일과
+    로그 파일을 그대로 노출한다. 사용자 결정(2026-09-19): push 채널(Slack 등)은
+    상용화 단계로 미루고, 지금은 이 화면에 보여주는 정도로 충분하다."""
+    checks: list[dict] = []
+    if _HEALTH_STATE_PATH.exists():
+        try:
+            state = json.loads(_HEALTH_STATE_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            state = {}
+        checks = [{"label": _HEALTH_CHECK_LABELS.get(k, k), "up": v} for k, v in state.items()]
+
+    recent_alerts: list[str] = []
+    if _ALERTS_LOG_PATH.exists():
+        lines = [ln for ln in _ALERTS_LOG_PATH.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        recent_alerts = list(reversed(lines[-20:]))
+
+    return {"checked": bool(checks), "checks": checks, "recent_alerts": recent_alerts}
+
+
 def _pipeline_stages() -> list[dict]:
     f16_mb = _file_mb(_F16_PATH)
     q4_mb = _file_mb(_GGUF_PATH)
@@ -300,7 +332,9 @@ def _pipeline_stages() -> list[dict]:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"stages": _pipeline_stages()})
+    return templates.TemplateResponse(
+        request, "index.html", {"stages": _pipeline_stages(), "status": _system_status()},
+    )
 
 
 @app.get("/education", response_class=HTMLResponse)

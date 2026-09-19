@@ -36,6 +36,32 @@
 </div>
 
 <div class="card">
+  <strong>실제 운영 상태</strong>
+  <div class="why">scripts/healthcheck_alert.py가 2분마다 systemd 서비스·HTTP 응답을 확인해 남긴 상태를 그대로 보여줍니다 — 별도 알림 채널(Slack 등) 없이, 지금은 이 화면이 곧 알림판입니다.</div>
+  {% if status.checked %}
+  <div style="display:flex; flex-wrap:wrap; gap:8px; margin:10px 0;">
+    {% for c in status.checks %}
+    <span style="padding:4px 10px; border-radius:6px; font-size:0.82rem; border:1px solid {{ 'var(--normal)' if c.up else 'var(--danger)' }}; color: {{ 'var(--normal)' if c.up else 'var(--danger)' }}; background: {{ 'rgba(63,185,80,0.1)' if c.up else 'rgba(248,81,73,0.1)' }};">
+      {{ '●' if c.up else '●' }} {{ c.label }} {{ '정상' if c.up else '장애' }}
+    </span>
+    {% endfor %}
+  </div>
+  {% if status.recent_alerts %}
+  <details>
+    <summary>최근 상태 변화 이력 ({{ status.recent_alerts|length }}건)</summary>
+    {% for line in status.recent_alerts %}
+    <div class="stat">{{ line }}</div>
+    {% endfor %}
+  </details>
+  {% else %}
+  <div class="stat">지금까지 상태 변화 없음(모두 계속 정상)</div>
+  {% endif %}
+  {% else %}
+  <div class="stat">아직 헬스체크 기록 없음 — mlops-healthcheck.timer 실행 확인 필요</div>
+  {% endif %}
+</div>
+
+<div class="card">
   <strong>직접 눌러보기</strong>
   <div class="why">아래 페이지에서 실제 센서 값을 넣어보면, 이 파이프라인(4~6번)이 실시간으로 어떻게 반응하는지 볼 수 있습니다.</div>
   <a href="/simulate"><button>엣지 시뮬레이션 열기 →</button></a>
