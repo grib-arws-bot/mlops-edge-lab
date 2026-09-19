@@ -2071,14 +2071,24 @@ def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
             total_out += usage.get("completion_tokens", 0)
             for r in _parse_requirements(raw):
                 cite = str(r.get("cite", "")).strip()
+                req_value = str(r.get("req_value", "")).strip()
                 # 근거 필수 원칙(BidRadar 1절) — cite가 실제로 이 조각 원문에 있는지
                 # 코드가 재검증. 퀴즈 기능의 grounding 검증과 같은 함수 재사용(88·89번).
                 if not cite or not _quiz_choice_grounded(cite, chunk):
                     continue
+                # 숫자 치환 오염 방어(2026-09-20, "3초"→"eterminate"류 토큰 오염이
+                # cite 필드에서 3회 관측됨, 의사결정_로그 94~96·100번). temperature=0으로
+                # 재현해보니 같은 입력엔 매번 재현되지만 다른 문서·다른 숫자에서는 전혀
+                # 재현 안 되는 드문 현상이었다 — 그래서 cite 문자열 전체를 엄격 매칭하는
+                # 대신(줄바꿈 등으로 정상 인용도 오탐될 위험) req_value의 숫자가 cite에
+                # 그대로 있는지만 좁게 검증한다. 토큰 중복도 검사는 단어 대부분이 겹치면
+                # 숫자 하나가 바뀌어도 통과시키는 구조라 이 실패 패턴을 못 잡았다.
+                if req_value and any(c.isdigit() for c in req_value) and req_value not in cite:
+                    continue
                 all_requirements.append({
                     "category": r.get("category", "기타"),
                     "req_text": str(r.get("req_text", "")).strip(),
-                    "req_value": str(r.get("req_value", "")).strip(),
+                    "req_value": req_value,
                     "req_unit": str(r.get("req_unit", "")).strip(),
                     "op": r.get("op", "manual"),
                     "cite": cite,
