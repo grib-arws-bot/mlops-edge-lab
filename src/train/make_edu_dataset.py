@@ -49,13 +49,18 @@ _GEN_INSTRUCTION = """다음은 교육 자료의 한 부분입니다. 이 내용
 """
 
 
-def _load_modifiable_chunks() -> list[tuple[str, str]]:
-    """(sub_domain, chunk) 목록 — allows_modification=True인 수집 항목의 청크만."""
+def _load_modifiable_chunks(source_ids: list[str] | None = None) -> list[tuple[str, str]]:
+    """(sub_domain, chunk) 목록 — allows_modification=True인 수집 항목의 청크만.
+
+    source_ids를 주면 그 소스들로 제한한다 — 운영 콘솔에서 사용자가 소스를 골라
+    학습에 포함시키는 기능(2026-09-19) 때문에 추가. None이면 기존처럼 전체."""
     chunks: list[tuple[str, str]] = []
     if not _COLLECTED_DIR.exists():
         return chunks
 
     for source_dir in sorted(_COLLECTED_DIR.iterdir()):
+        if source_ids is not None and source_dir.name not in source_ids:
+            continue
         items_path = source_dir / "items.jsonl"
         if not items_path.exists():
             continue
@@ -86,8 +91,8 @@ def _parse_response(text: str) -> tuple[str, str] | None:
     return (question, answer) if question and answer else None
 
 
-def generate(sample_size: int = 60, seed: int = 42) -> list[dict]:
-    chunks = _load_modifiable_chunks()
+def generate(sample_size: int = 60, seed: int = 42, source_ids: list[str] | None = None) -> list[dict]:
+    chunks = _load_modifiable_chunks(source_ids)
     if not chunks:
         raise RuntimeError("파인튜닝 가능(allows_modification=True) 수집 데이터가 없음 — src/collect/run.py 먼저 실행 필요")
 
@@ -121,20 +126,34 @@ def generate(sample_size: int = 60, seed: int = 42) -> list[dict]:
     return examples
 
 
-def main() -> None:
-    examples = generate()
+def build_and_save(
+    sample_size: int = 60,
+    source_ids: list[str] | None = None,
+    train_name: str = "edu_social_train.jsonl",
+    val_name: str = "edu_social_val.jsonl",
+) -> tuple[int, int]:
+    """generate() 결과를 8:2로 나눠 저장하고 (train건수, val건수)를 반환한다.
+    운영 콘솔(웹)의 학습 작업(run_edu_training_job.py)이 소스를 골라 호출할 때도
+    이 함수를 그대로 쓴다 — CLI(main)와 웹 트리거가 같은 경로를 타야 동작이 갈리지 않는다."""
+    examples = generate(sample_size=sample_size, source_ids=source_ids)
     rng = random.Random(7)
     rng.shuffle(examples)
     split = int(len(examples) * 0.8)
     train, val = examples[:split], examples[split:]
 
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for name, rows in (("edu_social_train.jsonl", train), ("edu_social_val.jsonl", val)):
+    for name, rows in ((train_name, train), (val_name, val)):
         path = _OUT_DIR / name
         with path.open("w", encoding="utf-8") as f:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         print(f"{path} — {len(rows)}건")
+
+    return len(train), len(val)
+
+
+def main() -> None:
+    build_and_save()
 
 
 if __name__ == "__main__":

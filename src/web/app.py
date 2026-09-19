@@ -28,11 +28,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from llama_cpp import Llama
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent import rules
 from agent.run import preview, run_agent, to_dict
 from agent.tools import ToolContext
+from collect import registry as collect_registry
+from collect.storage import collection_summary
+from rag import query_edu
 from sensors import CATEGORIES, LOCS, SEVERITY_RATIO, VALUE_CEILING, is_lower_is_worse, substance_lookup
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -85,11 +89,32 @@ def _load_gpu_llm_or_disable_gpu_profiles() -> None:
             del EDGE_PROFILES[key]
 
 
+def _load_edu_rag_or_disable() -> None:
+    """교육 RAG 인덱스가 아직 안 만들어졌을 수도 있다(운영 콘솔에서 소스를 새로 고를
+    때마다 다시 빌드하는 게 아니라 수동 빌드 스크립트라서) — 없으면 조용히 숨기지 않고
+    /edu-admin 화면에서 "인덱스 없음"이라고 명시한다."""
+    if not query_edu.index_available():
+        _state["edu_embed_model"] = None
+        _state["edu_index"] = None
+        _state["edu_meta"] = None
+        return
+    try:
+        _state["edu_embed_model"] = SentenceTransformer(query_edu.EMBED_MODEL)
+        _state["edu_index"] = query_edu.load_index()
+        _state["edu_meta"] = query_edu.load_meta()
+    except Exception as exc:  # noqa: BLE001 — 로드 실패해도 나머지 페이지는 정상 동작해야 함
+        print(f"[startup] 교육 RAG 인덱스 로드 실패: {exc}")
+        _state["edu_embed_model"] = None
+        _state["edu_index"] = None
+        _state["edu_meta"] = None
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _state["ctx"] = ToolContext.load()
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
     _load_gpu_llm_or_disable_gpu_profiles()
+    _load_edu_rag_or_disable()
     _ensure_deck_pdf()
     _init_control_room()
     control_room_task = asyncio.create_task(_control_room_loop())
@@ -724,3 +749,133 @@ async def set_control_room_edge_profile(request: Request):
         return JSONResponse({"error": "알 수 없는 엣지 프로파일"}, status_code=400)
     _control_room_edge_profile = key
     return JSONResponse({"status": "ok", "edge_profile": key, "label": EDGE_PROFILES[key]["label"]})
+
+
+# ── 스마트교육 운영 콘솔 (2026-09-19) ──────────────────────────────────────
+# 수집 현황 표시 + 소스 선택 학습 트리거 + "학생 체험"(RAG vs 파인튜닝 비교).
+# 학습/파인튜닝-단독 답변은 둘 다 무거운 별도 프로세스로 돌린다(위 control-room과
+# 달리 GPU에 transformers 모델을 새로 올려야 해서 인프로세스 llama_cpp와 자원을
+# 다툰다 — finetune_lora.py에서 실제로 겪은 GPU 충돌과 같은 이유).
+
+_EDU_JOB_STATUS_PATH = _ROOT / "experiments" / "edu-social-lora" / "job_status.json"
+_EDU_PYTHON_BIN = _ROOT / ".venv" / "bin" / "python"
+
+
+def _edu_job_status() -> dict:
+    if not _EDU_JOB_STATUS_PATH.exists():
+        return {"status": "idle"}
+    try:
+        return json.loads(_EDU_JOB_STATUS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"status": "idle"}
+
+
+@app.get("/edu-admin", response_class=HTMLResponse)
+def edu_admin(request: Request):
+    summary_by_source = {s["source_id"]: s for s in collection_summary()}
+    sources = []
+    for config in collect_registry.SOURCES:
+        collected = summary_by_source.get(config.source_id)
+        sources.append({
+            "source_id": config.source_id,
+            "name": config.name,
+            "implemented": config.implemented,
+            "requires_auth": config.requires_auth,
+            "notes": config.notes,
+            "license_type": config.license.license_type,
+            "allows_modification": collected["allows_modification"] if collected else config.license.allows_modification,
+            "item_count": collected["item_count"] if collected else 0,
+            "last_collected_at": collected["last_collected_at"] if collected else None,
+        })
+
+    return templates.TemplateResponse(
+        request, "edu_admin.html",
+        {
+            "sources": sources,
+            "job": _edu_job_status(),
+            "rag_available": _state.get("edu_index") is not None,
+            "finetuned_available": (_ROOT / "experiments" / "edu-social-lora" / "final").exists(),
+        },
+    )
+
+
+@app.get("/api/edu-admin/status")
+def edu_admin_status():
+    return JSONResponse(_edu_job_status())
+
+
+@app.post("/api/edu-admin/train")
+async def edu_admin_train(request: Request):
+    payload = await request.json()
+    selected = payload.get("sources", [])
+    if not selected:
+        return JSONResponse({"error": "소스를 하나 이상 선택하세요"}, status_code=400)
+
+    summary_by_source = {s["source_id"]: s for s in collection_summary()}
+    blocked = [
+        sid for sid in selected
+        if not summary_by_source.get(sid, {}).get("allows_modification")
+    ]
+    if blocked:
+        # UI에서 이미 막지만, 라이선스 위반 방지는 서버가 최종 책임진다 —
+        # 체크박스 disabled는 클라이언트에서 얼마든지 우회 가능하기 때문.
+        return JSONResponse(
+            {"error": f"파인튜닝에 쓸 수 없는 소스(라이선스상 변경 금지): {', '.join(blocked)}"},
+            status_code=400,
+        )
+
+    current = _edu_job_status()
+    if current.get("status") == "running":
+        return JSONResponse({"error": "이미 학습이 진행 중입니다"}, status_code=409)
+
+    subprocess.Popen(
+        [str(_EDU_PYTHON_BIN), "-m", "train.run_edu_training_job", "--sources", ",".join(selected)],
+        cwd=str(_ROOT),
+        env={**os.environ, "PYTHONPATH": str(_ROOT / "src")},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return JSONResponse({"status": "started", "sources": selected})
+
+
+@app.post("/api/edu-admin/ask")
+async def edu_admin_ask(request: Request):
+    """학생 체험 — RAG 모드는 이미 로드된 인프로세스 리소스로 즉시 답하고, 파인튜닝
+    비교 모드는 별도 프로세스(ask_edu_adapter.py)를 띄운다(느림, 수십 초)."""
+    payload = await request.json()
+    question = (payload.get("question") or "").strip()
+    mode = payload.get("mode", "rag")
+    if not question:
+        return JSONResponse({"error": "질문을 입력하세요"}, status_code=400)
+
+    loop = asyncio.get_event_loop()
+
+    if mode == "rag":
+        if _state.get("edu_index") is None:
+            return JSONResponse({"error": "RAG 인덱스가 없습니다 — rag/build_edu_index.py 먼저 실행 필요"}, status_code=400)
+        result = await loop.run_in_executor(
+            None, query_edu.answer, question, _state["edu_embed_model"], _state["edu_index"], _state["edu_meta"], _state["llm"],
+        )
+        return JSONResponse({"mode": "rag", **result})
+
+    if mode == "finetuned":
+        adapter_dir = _ROOT / "experiments" / "edu-social-lora" / "final"
+        if not adapter_dir.exists():
+            return JSONResponse({"error": "파인튜닝 어댑터가 없습니다 — 먼저 학습을 실행하세요"}, status_code=400)
+
+        def _run_subprocess():
+            return subprocess.run(
+                [str(_EDU_PYTHON_BIN), "-m", "train.ask_edu_adapter", question],
+                cwd=str(_ROOT), env={**os.environ, "PYTHONPATH": str(_ROOT / "src")},
+                capture_output=True, text=True, timeout=120,
+            )
+
+        proc = await loop.run_in_executor(None, _run_subprocess)
+        if proc.returncode != 0:
+            return JSONResponse({"error": f"어댑터 실행 실패: {proc.stderr[-800:]}"}, status_code=500)
+        try:
+            parsed = json.loads(proc.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            return JSONResponse({"error": "어댑터 응답 파싱 실패"}, status_code=500)
+        return JSONResponse({"mode": "finetuned", "answer": parsed["answer"], "sources": []})
+
+    return JSONResponse({"error": "알 수 없는 모드"}, status_code=400)
