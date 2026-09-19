@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -490,6 +491,9 @@ def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool,
     이벤트 하나짜리 리스트를 그대로 기대하는 기존 호출부를 그대로 보존하기 위함."""
     core_list = ",".join(str(i) for i in range(cores))
     python_bin = _ROOT / ".venv" / "bin" / "python"
+    # 스코프 이름을 직접 지정해둔다 — 타임아웃 시 이 이름으로 확실히 정지시키기 위해
+    # 필요하다(아래 except 참고).
+    scope_unit = f"mlops-edge-emu-{uuid.uuid4().hex[:8]}.scope"
 
     with tempfile.TemporaryDirectory() as tmp:
         events_path = Path(tmp) / "events.json"
@@ -497,20 +501,31 @@ def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool,
         events_path.write_text(json.dumps(events, ensure_ascii=False), encoding="utf-8")
 
         cmd = [
-            "systemd-run", "--user", "--scope", "--quiet",
+            "systemd-run", "--user", "--scope", "--quiet", f"--unit={scope_unit}",
             "-p", f"CPUQuota={cores * 100}%",
             "-p", f"MemoryMax={mem_gb}G",
             "-p", "MemorySwapMax=0",
             "--", "taskset", "-c", core_list,
             str(python_bin), "-m", "agent.run_cli", str(events_path), str(output_path),
         ]
-        proc = subprocess.run(
-            cmd, cwd=str(_ROOT), timeout=180, capture_output=True, text=True,
-            env={
-                **os.environ, "PYTHONPATH": str(_ROOT / "src"), "AGENT_THREADS": str(cores),
-                "AGENT_GPU": "1" if gpu else "0", "AGENT_COMPOSITE": "1" if composite else "0",
-            },
-        )
+        try:
+            proc = subprocess.run(
+                cmd, cwd=str(_ROOT), timeout=180, capture_output=True, text=True,
+                env={
+                    **os.environ, "PYTHONPATH": str(_ROOT / "src"), "AGENT_THREADS": str(cores),
+                    "AGENT_GPU": "1" if gpu else "0", "AGENT_COMPOSITE": "1" if composite else "0",
+                },
+            )
+        except subprocess.TimeoutExpired:
+            # subprocess.run의 기본 타임아웃 처리는 우리가 직접 띄운 systemd-run
+            # "실행기" 프로세스만 죽인다 — --scope로 만든 실제 스코프(무거운 연산이
+            # 도는 곳)는 별개로 계속 돌아서, 죽이지 않으면 좀비로 남아 taskset이
+            # 고정한 CPU 코어를 계속 점유한다. 2026-09-19 실제로 겪음: 타임아웃 난
+            # 요청의 좀비가 남아서 다음 요청들까지 같은 코어를 나눠 쓰다 연쇄
+            # 타임아웃으로 번짐. 스코프 이름을 알고 있으니 명시적으로 정지시킨다.
+            subprocess.run(["systemctl", "--user", "stop", scope_unit], capture_output=True)
+            raise RuntimeError(f"엣지 에뮬레이션 타임아웃(180초 초과) — 좀비 프로세스는 정리했습니다")
+
         if proc.returncode != 0 or not output_path.exists():
             raise RuntimeError(f"엣지 에뮬레이션 실행 실패(exit {proc.returncode}): {proc.stderr[-1500:]}")
         return json.loads(output_path.read_text(encoding="utf-8"))

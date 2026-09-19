@@ -23,24 +23,36 @@ _INDEX_PATH = _ROOT / "data" / "processed" / "rag_index.faiss"
 
 @dataclass
 class ToolContext:
-    """RAG 인덱스·임베딩 모델을 한 번만 로드해서 도구 호출마다 재사용."""
+    """RAG 인덱스·임베딩 모델을 지연 로드한다 — LLM이 실제로 search_guidelines를 호출할
+    때만 로드하고, 로드 후에는 재사용한다.
 
-    embed_model: SentenceTransformer
-    index: object
-    meta: list[dict]
+    **2026-09-19 변경**: 원래는 load()가 무조건 즉시 로드했는데, 실측해보니 이게
+    7초 넘게 걸렸다(e5-small 임베딩 모델 + FAISS 인덱스). 엣지 에뮬레이션(/simulate,
+    agent/run_cli.py)은 요청마다 새 프로세스를 띄우는데, LLM이 검색을 아예 안 부르는
+    경우(실제로 흔함 — 판정·장비조치는 이미 다 정해져 있어서 LLM이 굳이 안 찾아봐도
+    될 때가 많음)에도 이 로드 비용을 매번 냈다. "복합 센서 시뮬레이션이 GPU를 써도
+    느리다"는 사용자 지적을 파보다가 실제 병목이 여기였다는 걸 확인함 — LLM 추론
+    자체는 1~5초인데 이 초기화가 7초를 더 얹고 있었음."""
+
+    embed_model: SentenceTransformer | None = None
+    index: object = None
+    meta: list[dict] | None = None
     notify_log: list[dict] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> "ToolContext":
-        return cls(
-            embed_model=SentenceTransformer(EMBED_MODEL),
-            index=faiss.read_index(str(_INDEX_PATH)),
-            meta=load_meta(),
-        )
+        return cls()
+
+    def _ensure_rag_loaded(self) -> None:
+        if self.embed_model is None:
+            self.embed_model = SentenceTransformer(EMBED_MODEL)
+            self.index = faiss.read_index(str(_INDEX_PATH))
+            self.meta = load_meta()
 
 
 def search_guidelines(ctx: ToolContext, query: str, top_k: int = 3) -> list[dict]:
     """로드맵 5번 RAG 검색을 도구로 노출. LLM이 검색 여부·검색어를 스스로 판단해 호출한다."""
+    ctx._ensure_rag_loaded()
     hits = retrieve(query, ctx.embed_model, ctx.index, ctx.meta, top_k=top_k)
     return [{"source": h["source"], "text": h["text"][:300]} for h, score in hits]
 
