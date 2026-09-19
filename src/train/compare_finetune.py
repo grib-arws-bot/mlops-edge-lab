@@ -15,8 +15,6 @@ import json
 import os
 from pathlib import Path
 
-import mlflow
-
 from train.evaluate import run_eval
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -28,25 +26,21 @@ os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
 
 
 def run_comparison() -> dict[str, float]:
-    mlflow.set_experiment("sllm-finetune")
-
+    # run_eval() 자체가 내부적으로 mlflow.start_run()을 열고 닫는다 — 여기서 또
+    # 감싸면 "Run with UUID ... is already active" 충돌이 난다(2026-09-20 실제로
+    # 겪음). 그래서 run_eval()이 자기 run을 스스로 관리하게 두고, 여기서는 반환값만
+    # 받아 델타를 계산한다.
     print("=== 베이스 모델(파인튜닝 없음) ===")
-    with mlflow.start_run(run_name="edu-social-base-eval"):
-        base_score = run_eval(
-            adapter_dir=None, run_name="edu-social-base-eval",
-            val_path=_VAL_PATH, out_name="eval_edu_social_base.jsonl",
-        )
-        mlflow.log_metric("avg_rougeL", base_score)
-        mlflow.log_param("adapter", "none")
+    base_score = run_eval(
+        adapter_dir=None, run_name="edu-social-base-eval",
+        val_path=_VAL_PATH, out_name="eval_edu_social_base.jsonl",
+    )
 
     print("\n=== 파인튜닝된 어댑터(edu-social-lora) ===")
-    with mlflow.start_run(run_name="edu-social-finetuned-eval"):
-        finetuned_score = run_eval(
-            adapter_dir=_ADAPTER_DIR, run_name="edu-social-finetuned-eval",
-            val_path=_VAL_PATH, out_name="eval_edu_social_finetuned.jsonl",
-        )
-        mlflow.log_metric("avg_rougeL", finetuned_score)
-        mlflow.log_param("adapter", "edu-social-lora")
+    finetuned_score = run_eval(
+        adapter_dir=_ADAPTER_DIR, run_name="edu-social-finetuned-eval",
+        val_path=_VAL_PATH, out_name="eval_edu_social_finetuned.jsonl",
+    )
 
     delta = finetuned_score - base_score
     result = {"base_rougeL": base_score, "finetuned_rougeL": finetuned_score, "delta": delta}
