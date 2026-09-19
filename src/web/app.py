@@ -807,7 +807,6 @@ def edu_admin(request: Request):
         request, "edu_admin.html",
         {
             "sources": sources,
-            "job": _edu_job_status(),
             "rag_available": _state.get("edu_index") is not None,
             "finetuned_available": (_ROOT / "experiments" / "edu-social-lora" / "final").exists(),
         },
