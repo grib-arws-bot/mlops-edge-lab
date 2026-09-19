@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import argparse
 
-from collect.connectors import national_atlas
+from collect.connectors import kdi_econ_edu, national_atlas
 from collect.registry import sources_for
 
 _CONNECTORS = {
     "nationalatlas_youth": national_atlas.collect,
+    "kdi_econ_edu": kdi_econ_edu.collect,
 }
 
 
