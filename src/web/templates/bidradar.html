@@ -15,6 +15,8 @@
   .endpoint-tag { font-family: monospace; font-size: 0.76rem; padding: 1px 6px; border-radius: 4px; background: rgba(79,140,255,0.15); color: var(--accent); }
   .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--normal); margin-right: 6px; animation: pulse 2s infinite; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .daily-chart-legend { display: flex; gap: 16px; margin-top: 6px; font-size: 0.78rem; color: var(--muted); }
+  .daily-chart-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 </style>
 
 <div class="page-header">
@@ -25,6 +27,12 @@
 </div>
 
 <div class="bidradar-cards" id="endpoint-cards"></div>
+
+<div class="card" style="margin-top:16px;">
+  <strong>일별 호출 추이</strong>
+  <div class="why">서버 재시작 전까지 누적된 실제 호출 기록을 날짜별로 집계합니다(최대 300건 보관 — 트래픽이 많은 날엔 과거 날짜가 밀려날 수 있음).</div>
+  <div id="daily-chart-area" style="margin-top:10px;"></div>
+</div>
 
 <div class="card" style="margin-top:16px;">
   <strong>최근 호출 기록</strong>
@@ -64,6 +72,44 @@ function renderCards(endpoints) {
   }).join('');
 }
 
+function renderDailyChart(daily) {
+  const area = document.getElementById('daily-chart-area');
+  if (!daily.length) {
+    area.innerHTML = '<div class="stat">아직 호출 기록이 없습니다.</div>';
+    return;
+  }
+  const width = 700, height = 160, padBottom = 24, padTop = 10, barGap = 12;
+  const maxTotal = Math.max(...daily.map(d => d.total), 1);
+  const barWidth = Math.min(60, (width - barGap * (daily.length + 1)) / daily.length);
+  const usableH = height - padBottom - padTop;
+  const scale = usableH / maxTotal;
+
+  let bars = '';
+  daily.forEach((d, i) => {
+    const x = barGap + i * (barWidth + barGap);
+    const successH = d.success * scale;
+    const failedH = d.failed * scale;
+    const successY = height - padBottom - successH;
+    const failedY = successY - failedH;
+    if (d.success > 0) {
+      bars += `<rect x="${x}" y="${successY}" width="${barWidth}" height="${successH}" fill="var(--normal)" rx="2"></rect>`;
+    }
+    if (d.failed > 0) {
+      bars += `<rect x="${x}" y="${failedY}" width="${barWidth}" height="${failedH}" fill="var(--danger)" rx="2"></rect>`;
+    }
+    bars += `<text x="${x + barWidth / 2}" y="${height - padBottom + 16}" text-anchor="middle" font-size="11" fill="var(--muted)">${escapeHtml(d.date.slice(5))}</text>`;
+    bars += `<text x="${x + barWidth / 2}" y="${Math.min(successY, failedY, height - padBottom) - 4}" text-anchor="middle" font-size="11" fill="var(--text)">${d.total}</text>`;
+  });
+
+  const svgWidth = Math.max(width, barGap + daily.length * (barWidth + barGap));
+  area.innerHTML = `
+    <svg viewBox="0 0 ${svgWidth} ${height}" style="width:100%; max-width:${svgWidth}px; height:${height}px;">${bars}</svg>
+    <div class="daily-chart-legend">
+      <span><span class="sw" style="background:var(--normal);"></span>성공</span>
+      <span><span class="sw" style="background:var(--danger);"></span>실패</span>
+    </div>`;
+}
+
 function renderLog(recent) {
   const area = document.getElementById('log-area');
   if (!recent.length) {
@@ -92,6 +138,7 @@ async function refreshBidradarStats() {
     const res = await fetch('/api/bidradar/stats');
     const data = await res.json();
     renderCards(data.endpoints);
+    renderDailyChart(data.daily || []);
     renderLog(data.recent);
   } catch (e) {
     // 폴링 실패는 조용히 넘어간다 — 다음 주기에 다시 시도

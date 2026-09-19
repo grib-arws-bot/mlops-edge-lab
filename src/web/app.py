@@ -1155,6 +1155,7 @@ def bidradar_stats():
         "endpoints": per_endpoint,
         "recent": _bidradar_call_log[:50],
         "total_calls": len(_bidradar_call_log),
+        "daily": _bidradar_daily_stats(),
     })
 
 
@@ -1806,6 +1807,20 @@ def _log_bidradar_call(
         "latency_ms": latency_ms, "tokens_in": tokens_in, "tokens_out": tokens_out, "error_code": error_code,
     })
     del _bidradar_call_log[_MAX_BIDRADAR_LOG:]
+
+
+def _bidradar_daily_stats() -> list[dict]:
+    """날짜별 호출량 집계(사용자 요청, 2026-09-20 "매일의 기록을 그래프로") — "at"의
+    날짜 부분만 잘라 그룹핑한다. 로그 자체가 최대 300건까지만 남는 런타임 메모리라
+    (_MAX_BIDRADAR_LOG), 트래픽이 많은 날엔 그만큼 과거 날짜가 밀려날 수 있다는
+    한계가 있다 — 지금은 실 트래픽이 적어 체감되지 않지만 그대로 기록해둔다."""
+    by_date: dict[str, dict] = {}
+    for c in _bidradar_call_log:
+        date = c["at"][:10]
+        d = by_date.setdefault(date, {"date": date, "total": 0, "success": 0, "failed": 0})
+        d["total"] += 1
+        d["success" if c["success"] else "failed"] += 1
+    return sorted(by_date.values(), key=lambda d: d["date"])
 
 
 def _bidradar_check_auth(request: Request) -> JSONResponse | None:
