@@ -1136,12 +1136,15 @@ def bidradar_page(request: Request):
 @app.get("/api/bidradar/stats")
 def bidradar_stats():
     """실제 BidRadar 호출 기록 집계 — 시뮬레이션이 아니라 /v1/* 엔드포인트가 실제로
-    받은 요청만 반영한다(사용자 요청, 2026-09-20). 서버 재시작 전까지만 유지되는
-    런타임 메모리 기록이라(control-room 패턴과 동일), 배포 후엔 초기화된다."""
+    받은 요청만 반영한다(사용자 요청, 2026-09-20). 파일에서 매번 다시 읽는다
+    (2026-09-20 정정 — 원래 인메모리 리스트였는데, 배포로 서비스가 재시작될
+    때마다 지워져서 실제로 BidRadar가 접속했던 기록이 1시간 만에 사라진 걸
+    사용자가 직접 겪고 지적함. 재시작해도 남아야 한다는 요구로 파일 기반 전환)."""
+    call_log = _load_bidradar_call_log()
     endpoints = ["classify-doc", "classify-topic", "extract-requirements"]
     per_endpoint = {}
     for ep in endpoints:
-        calls = [c for c in _bidradar_call_log if c["endpoint"] == ep]
+        calls = [c for c in call_log if c["endpoint"] == ep]
         success = [c for c in calls if c["success"]]
         per_endpoint[ep] = {
             "total": len(calls),
@@ -1153,9 +1156,9 @@ def bidradar_stats():
         }
     return JSONResponse({
         "endpoints": per_endpoint,
-        "recent": _bidradar_call_log[:50],
-        "total_calls": len(_bidradar_call_log),
-        "daily": _bidradar_daily_stats(),
+        "recent": call_log[:50],
+        "total_calls": len(call_log),
+        "daily": _bidradar_daily_stats(call_log),
     })
 
 
@@ -1787,8 +1790,8 @@ _BIDRADAR_CLASSIFY_DOC_PROMPT = (
 )
 
 
-_bidradar_call_log: list[dict] = []
-_MAX_BIDRADAR_LOG = 300
+_BIDRADAR_CALL_LOG_PATH = _ROOT / "logs" / "bidradar_calls.jsonl"
+_MAX_BIDRADAR_LOG = 2000  # 파일 기반이라 메모리 부담이 적어 인메모리 시절(300)보다 넉넉히 보관
 
 _bidradar_jobs: dict[str, dict] = {}
 _MAX_BIDRADAR_JOBS = 100
@@ -1798,24 +1801,41 @@ def _log_bidradar_call(
     endpoint: str, trace_id: str, success: bool,
     latency_ms: int = 0, tokens_in: int = 0, tokens_out: int = 0, error_code: str | None = None,
 ) -> None:
-    """실제 BidRadar 호출 기록 — 시뮬레이션이 아니라 진짜 트래픽을 남긴다(사용자 요청,
-    2026-09-20 "실제 연동되는 상황을 실시간으로 보여주면 좋겠다"). control-room의
-    _simulation_history와 같은 패턴(런타임 동안만 유지, 배포 재시작 전까지)."""
-    _bidradar_call_log.insert(0, {
+    """실제 BidRadar 호출 기록을 파일에 append한다 — 라이선스 오버라이드 로그
+    (_LICENSE_OVERRIDE_LOG)와 같은 append-only 패턴. 원래는 인메모리 리스트였는데
+    (2026-09-20 최초 구현), 배포마다 서비스가 재시작되면서 실제로 BidRadar가
+    접속했던 기록이 후속 배포 한 번으로 사라진 걸 사용자가 직접 겪고("1시간 전쯤
+    접속해왔던 내용은 왜 사라졌지?") 지적해서 파일 기반으로 전환."""
+    entry = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "endpoint": endpoint, "trace_id": trace_id, "success": success,
         "latency_ms": latency_ms, "tokens_in": tokens_in, "tokens_out": tokens_out, "error_code": error_code,
-    })
-    del _bidradar_call_log[_MAX_BIDRADAR_LOG:]
+    }
+    _BIDRADAR_CALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _BIDRADAR_CALL_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _bidradar_daily_stats() -> list[dict]:
+def _load_bidradar_call_log() -> list[dict]:
+    """최신순(내림차순)으로 반환 — 기존 인메모리 리스트가 쓰던 순서와 맞춘다.
+    파일이 무한정 커지지 않게 오래된 줄은 읽을 때 정리한다(_MAX_BIDRADAR_LOG)."""
+    if not _BIDRADAR_CALL_LOG_PATH.exists():
+        return []
+    text = _BIDRADAR_CALL_LOG_PATH.read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in text.split("\n") if line.strip()]
+    if len(entries) > _MAX_BIDRADAR_LOG:
+        entries = entries[-_MAX_BIDRADAR_LOG:]
+        with _BIDRADAR_CALL_LOG_PATH.open("w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    return list(reversed(entries))
+
+
+def _bidradar_daily_stats(call_log: list[dict]) -> list[dict]:
     """날짜별 호출량 집계(사용자 요청, 2026-09-20 "매일의 기록을 그래프로") — "at"의
-    날짜 부분만 잘라 그룹핑한다. 로그 자체가 최대 300건까지만 남는 런타임 메모리라
-    (_MAX_BIDRADAR_LOG), 트래픽이 많은 날엔 그만큼 과거 날짜가 밀려날 수 있다는
-    한계가 있다 — 지금은 실 트래픽이 적어 체감되지 않지만 그대로 기록해둔다."""
+    날짜 부분만 잘라 그룹핑한다."""
     by_date: dict[str, dict] = {}
-    for c in _bidradar_call_log:
+    for c in call_log:
         date = c["at"][:10]
         d = by_date.setdefault(date, {"date": date, "total": 0, "success": 0, "failed": 0})
         d["total"] += 1
