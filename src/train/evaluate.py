@@ -51,7 +51,7 @@ def load_val_examples(val_path: Path = _VAL_PATH) -> list[dict]:
 
 
 def run_eval(
-    adapter_dir: Path = _ADAPTER_DIR,
+    adapter_dir: Path | None = _ADAPTER_DIR,
     run_name: str = "toy-sensor-lora-eval",
     val_path: Path = _VAL_PATH,
     out_name: str = "eval_toy_sensor.jsonl",
@@ -60,10 +60,16 @@ def run_eval(
     "이번 학습이 기준을 통과했는가"를 판단한다 — 그래서 함수로 뺐다(원래는 main()에 다
     들어있었음). val_path/out_name은 도메인별 검증셋을 재사용하려고 뺐다(2026-09-19,
     edu_social 검증에서 처음 필요해짐) — 기본값은 기존 toy-sensor 경로 그대로라
-    auto_retrain.py 호출부는 안 바뀜."""
+    auto_retrain.py 호출부는 안 바뀜.
+
+    adapter_dir=None이면 LoRA 없이 베이스 모델 그대로 평가한다(2026-09-20,
+    compare_finetune.py에서 처음 필요해짐) — "파인튜닝이 실제로 도움이 되는가"를
+    같은 검증셋·같은 채점 방식으로 베이스와 직접 비교하기 위함. 지금까지 이 함수는
+    파인튜닝된 어댑터의 절대 점수만 봤지 베이스 대비 개선폭은 한 번도 측정한 적이
+    없었다."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype="bfloat16", device_map="auto")
-    model = PeftModel.from_pretrained(base_model, str(adapter_dir))
+    model = PeftModel.from_pretrained(base_model, str(adapter_dir)) if adapter_dir is not None else base_model
     model.eval()
 
     scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=CharTokenizer())
