@@ -411,6 +411,8 @@ def education(request: Request):
 _RAG_GOLDEN_SET_PATH = _ROOT / "data" / "processed" / "rag_golden_set.jsonl"
 _RAG_EVAL_RESULT_PATH = _ROOT / "data" / "processed" / "rag_retrieval_eval_result.jsonl"
 _FINETUNE_COMPARISON_PATH = _ROOT / "data" / "processed" / "finetune_comparison.json"
+_SAFETY_EVAL_RESULT_PATH = _ROOT / "data" / "processed" / "safety_retrieval_eval_result.jsonl"
+_SAFETY_FINETUNE_COMPARISON_PATH = _ROOT / "data" / "processed" / "finetune_comparison_safety.json"
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -422,33 +424,56 @@ def _load_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in text.split("\n") if line.strip()]
 
 
-def _quality_eval_summary() -> dict:
-    """품질 평가 파일럿(98·99번) 결과를 실제 파일에서 매번 다시 읽어 보여준다 —
-    파이프라인 페이지와 같은 원칙("화면에 보이는 것은 항상 실제 산출물에서 나온다").
-    골든셋 3문항·검증셋 12문항짜리 작은 파일럿이라는 걸 화면에서도 그대로 드러낸다
-    (표본 크기를 숨기지 않음)."""
+def _rag_quality_edu() -> dict:
     golden_by_q = {r["question"]: r for r in _load_jsonl(_RAG_GOLDEN_SET_PATH)}
-    eval_rows = _load_jsonl(_RAG_EVAL_RESULT_PATH)
-    rag_rows = [
+    rows = [
         {
             "question": r["question"],
-            "expected_source_id": r["expected_source_id"],
-            "hit": r["hit"],
-            "rank": r.get("rank"),
-            "retrieved_source_ids": r.get("retrieved_source_ids", []),
-            "source_title": golden_by_q.get(r["question"], {}).get("source_title", ""),
+            "expected": golden_by_q.get(r["question"], {}).get("source_title") or r["expected_source_id"],
+            "hit": r["hit"], "rank": r.get("rank"),
         }
-        for r in eval_rows
+        for r in _load_jsonl(_RAG_EVAL_RESULT_PATH)
     ]
-    rag_hit_rate = round(sum(r["hit"] for r in rag_rows) / len(rag_rows), 3) if rag_rows else None
+    return {"rows": rows, "hit_rate": round(sum(r["hit"] for r in rows) / len(rows), 3) if rows else None, "n": len(rows)}
 
-    finetune = None
-    if _FINETUNE_COMPARISON_PATH.exists():
-        finetune = json.loads(_FINETUNE_COMPARISON_PATH.read_text(encoding="utf-8"))
 
+def _rag_quality_safety() -> dict:
+    rows = [
+        {"question": r["question"], "expected": r["expected_source"], "hit": r["hit"], "rank": r.get("rank")}
+        for r in _load_jsonl(_SAFETY_EVAL_RESULT_PATH)
+    ]
+    return {"rows": rows, "hit_rate": round(sum(r["hit"] for r in rows) / len(rows), 3) if rows else None, "n": len(rows)}
+
+
+def _finetune_quality(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _quality_eval_summary() -> dict:
+    """품질 평가 파일럿(98·99·104번) 결과를 서비스(도메인)별로 묶어서 보여준다 —
+    처음엔 AI튜터에만 만들었다가, "산업안전도 골든셋이 있어야 하지 않나" 지적으로
+    두 도메인 모두 같은 구조로 확장했다. 파이프라인 페이지와 같은 원칙(실제 결과
+    파일을 매번 다시 읽음, 하드코딩 없음) — 표본 크기(골든셋 문항 수 등)도 숨기지
+    않고 그대로 노출한다."""
     return {
-        "rag_rows": rag_rows, "rag_hit_rate": rag_hit_rate, "rag_n": len(rag_rows),
-        "finetune": finetune,
+        "services": [
+            {
+                "key": "safety", "name": "산업안전 Agent",
+                "rag_note": "임베딩 단독 검색(하이브리드 없음) — 실제 안전문서 738건 코퍼스",
+                "rag": _rag_quality_safety(),
+                "finetune": _finetune_quality(_SAFETY_FINETUNE_COMPARISON_PATH),
+                "finetune_note": "toy-sensor-lora — 학습 데이터가 템플릿 합성이라(21번) 절대 수치는 품질 지표가 아니라 파이프라인 동작 증거에 가깝습니다.",
+            },
+            {
+                "key": "edu", "name": "AI 튜터",
+                "rag_note": "하이브리드(BM25+임베딩) 검색 — 실제 수집 문서 42건(등록 10개 소스 중 2개만 구현됨)",
+                "rag": _rag_quality_edu(),
+                "finetune": _finetune_quality(_FINETUNE_COMPARISON_PATH),
+                "finetune_note": "edu-social-lora — 실제 문서 기반 학습 데이터라 의미 있는 비교지만, 개선폭 중 문체 모방과 내용 정확도는 구분되지 않습니다(99번).",
+            },
+        ],
     }
 
 

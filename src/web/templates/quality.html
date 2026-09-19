@@ -2,6 +2,8 @@
 {% block title %}품질 평가 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
 <style>
+  .service-block { margin-bottom: 28px; }
+  .service-title { font-size: 1.2rem; font-weight: 700; margin: 0 0 4px; }
   .quality-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
   @media (max-width: 900px) { .quality-grid { grid-template-columns: 1fr; } }
   .big-metric { font-size: 2.4rem; font-weight: 700; margin: 4px 0; }
@@ -17,59 +19,64 @@
   .hit-yes { color: var(--normal); font-weight: 700; }
   .hit-no { color: var(--danger); font-weight: 700; }
   .n-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; background: rgba(139,147,163,0.15); color: var(--muted); font-size: 0.76rem; margin-left: 8px; }
+  .caveat-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; background: rgba(210,153,34,0.15); color: var(--llm); font-size: 0.72rem; margin-left: 6px; border: 1px solid var(--llm); }
 </style>
 
 <div class="page-header">
   <div>
     <h1>품질 평가</h1>
-    <h2 style="margin-bottom:0;">모델·검색 로직을 바꿀 때마다 수작업 확인 대신 숫자로 비교하기 위한 회귀 테스트 — 화면 수치는 서버의 실제 결과 파일을 매번 다시 읽어 계산합니다.</h2>
+    <h2 style="margin-bottom:0;">모델·검색 로직을 바꿀 때마다 수작업 확인 대신 숫자로 비교하기 위한 서비스별 회귀 테스트 — 화면 수치는 서버의 실제 결과 파일을 매번 다시 읽어 계산합니다.</h2>
   </div>
 </div>
 
-<div class="quality-grid">
-  <div class="card">
-    <strong>RAG 검색 품질</strong><span class="n-badge">골든셋 {{ rag_n }}문항</span>
-    <div class="why">사람이 검수한 질문·정답 출처로, 하이브리드 검색이 top-4 안에서 정답 문서를 찾는지 채점합니다(LLM 호출 없음).</div>
-    {% if rag_n == 0 %}
-      <div class="stat" style="margin-top:10px;">아직 골든셋 평가 결과가 없습니다 — <code>rag/evaluate_retrieval.py</code>를 먼저 실행하세요.</div>
-    {% else %}
-      <div class="big-metric">{{ "%.0f"|format(rag_hit_rate * 100) }}%<span class="stat" style="display:inline; font-size:1rem;"> hit_rate@4</span></div>
-      <table class="quality-table">
-        <thead><tr><th>질문</th><th>기대 출처</th><th>결과</th></tr></thead>
-        <tbody>
-          {% for r in rag_rows %}
-          <tr>
-            <td>{{ r.question }}</td>
-            <td>{{ r.source_title or r.expected_source_id }}</td>
-            <td>
-              {% if r.hit %}<span class="hit-yes">O (순위 {{ r.rank }})</span>
-              {% else %}<span class="hit-no">X</span>{% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      <div class="why" style="margin-top:10px;">지금은 표본이 작아(2개 소스만 실제 인덱싱됨) 절대 수치보다 "회귀 테스트가 실제로 동작한다"는 것 자체에 의미가 있습니다 — 나머지 8개 소스는 API 키 발급 대기 중.</div>
-    {% endif %}
-  </div>
+{% for svc in services %}
+<div class="service-block">
+  <div class="service-title">{{ svc.name }}</div>
+  <div class="quality-grid">
+    <div class="card">
+      <strong>RAG 검색 품질</strong><span class="n-badge">골든셋 {{ svc.rag.n }}문항</span>
+      <div class="why">{{ svc.rag_note }}</div>
+      {% if svc.rag.n == 0 %}
+        <div class="stat" style="margin-top:10px;">아직 골든셋 평가 결과가 없습니다.</div>
+      {% else %}
+        <div class="big-metric">{{ "%.0f"|format(svc.rag.hit_rate * 100) }}%<span class="stat" style="display:inline; font-size:1rem;"> hit_rate@4</span></div>
+        <table class="quality-table">
+          <thead><tr><th>질문</th><th>기대 출처</th><th>결과</th></tr></thead>
+          <tbody>
+            {% for r in svc.rag.rows %}
+            <tr>
+              <td>{{ r.question }}</td>
+              <td>{{ r.expected }}</td>
+              <td>
+                {% if r.hit %}<span class="hit-yes">O (순위 {{ r.rank }})</span>
+                {% else %}<span class="hit-no">X</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
 
-  <div class="card">
-    <strong>파인튜닝 효과</strong><span class="n-badge">edu-social-lora</span>
-    <div class="why">같은 검증셋·같은 채점(ROUGE-L)으로 베이스 모델과 파인튜닝된 어댑터를 직접 비교합니다.</div>
-    {% if not finetune %}
-      <div class="stat" style="margin-top:10px;">아직 비교 결과가 없습니다 — <code>train/compare_finetune.py</code>를 먼저 실행하세요.</div>
-    {% else %}
-      <div class="compare-row">
-        <div class="compare-label">베이스</div>
-        <div class="compare-track"><div class="compare-fill base" style="width:{{ (finetune.base_rougeL * 100)|round(0, 'floor') }}%;">{{ "%.3f"|format(finetune.base_rougeL) }}</div></div>
-      </div>
-      <div class="compare-row">
-        <div class="compare-label">파인튜닝</div>
-        <div class="compare-track"><div class="compare-fill finetuned" style="width:{{ (finetune.finetuned_rougeL * 100)|round(0, 'floor') }}%;">{{ "%.3f"|format(finetune.finetuned_rougeL) }}</div></div>
-      </div>
-      <div class="stat" style="margin-top:10px;">개선폭: <strong style="color:var(--normal);">{{ "%+.3f"|format(finetune.delta) }}</strong>(상대 {{ "%+.0f"|format(finetune.delta / finetune.base_rougeL * 100) }}%)</div>
-      <div class="why" style="margin-top:10px;">생성 결과를 직접 비교해보면 베이스는 장황한 챗봇체, 파인튜닝은 정답(교사용 지도서 문체)에 가까운 짧은 문장 — 개선폭 중 얼마가 "내용 정확도"이고 얼마가 "문체 모방"인지는 이 숫자만으론 구분되지 않습니다(99번).</div>
-    {% endif %}
+    <div class="card">
+      <strong>파인튜닝 효과</strong>
+      {% if svc.finetune and svc.finetune.synthetic_data_caveat %}<span class="caveat-badge">합성 데이터</span>{% endif %}
+      <div class="why">{{ svc.finetune_note }}</div>
+      {% if not svc.finetune %}
+        <div class="stat" style="margin-top:10px;">아직 비교 결과가 없습니다.</div>
+      {% else %}
+        <div class="compare-row">
+          <div class="compare-label">베이스</div>
+          <div class="compare-track"><div class="compare-fill base" style="width:{{ (svc.finetune.base_rougeL * 100)|round(0, 'floor') }}%;">{{ "%.3f"|format(svc.finetune.base_rougeL) }}</div></div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-label">파인튜닝</div>
+          <div class="compare-track"><div class="compare-fill finetuned" style="width:{{ (svc.finetune.finetuned_rougeL * 100)|round(0, 'floor') }}%;">{{ "%.3f"|format(svc.finetune.finetuned_rougeL) }}</div></div>
+        </div>
+        <div class="stat" style="margin-top:10px;">개선폭: <strong style="color:var(--normal);">{{ "%+.3f"|format(svc.finetune.delta) }}</strong>(상대 {{ "%+.0f"|format(svc.finetune.delta / svc.finetune.base_rougeL * 100) }}%)</div>
+      {% endif %}
+    </div>
   </div>
 </div>
+{% endfor %}
 {% endblock %}
