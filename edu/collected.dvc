@@ -1,0 +1,6 @@
+outs:
+- md5: 871e275e5d3730fc3913852cdc5f76f0.dir
+  size: 558399060
+  nfiles: 8
+  hash: md5
+  path: collected
