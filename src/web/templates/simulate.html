@@ -56,7 +56,7 @@
   <div id="stopwatch" class="stopwatch"></div>
 
   <div id="results-box" class="card" style="display:none;">
-    <strong>② 센서별 판정 + LLM 알림 문구</strong>
+    <strong>② 공간 종합 판정 + LLM 알림 문구</strong>
     <div id="results-list"></div>
   </div>
 </div>
@@ -111,54 +111,40 @@ function renderEquipment(equipment) {
   document.getElementById('equipment-box').style.display = 'block';
 }
 
-function sendFeedback(btn, event, narrative, rating) {
-  const card = btn.closest('.sensor-result');
-  const body = rating === 'bad'
-    ? {event, narrative, rating, correction: card.querySelector('.correction-box').value.trim()}
-    : {event, narrative, rating};
-  fetch('/api/feedback', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  card.querySelector('.feedback-area').innerHTML = '<span class="stat">✓ 피드백 저장됨 — 다음 재학습에 반영 가능</span>';
-}
-
-function renderResults(results, elapsed, edgeLabel) {
+function renderResults(composite, elapsed, edgeLabel) {
+  // 활성화된 센서 전부를 한 공간으로 간주해 LLM이 종합 의견 하나만 낸다(2026-09-19,
+  // 복합 센서 시뮬레이션) — 그래서 예전처럼 센서마다 카드를 반복하지 않고, 센서별
+  // 판정 목록 + 종합 narrative 하나를 한 카드에 담는다. 피드백(👍/👎)은 일부러 뺐다 —
+  // 이 문장을 학습 데이터로 되돌리는 incorporate_feedback.py가 "이벤트 하나짜리" 형태를
+  // 기대하는데, 종합 서술은 그 형태에 안 맞아서 억지로 끼워 맞추면 학습 데이터가
+  // 왜곡된다. 복합 피드백 형식은 별도 설계가 필요한 후속 과제로 남겨둔다.
   const list = document.getElementById('results-list');
-  list.innerHTML = results.map((r, i) => `
+  const eventsHtml = composite.events.map(e => `
+    <div class="stat">
+      · ${e.event.category}(${e.event.substance}) 측정값 ${e.event.value}${e.event.unit} / 임계값 ${e.event.threshold}${e.event.unit}
+      <span class="severity ${e.judgement.severity}">${e.judgement.severity}</span>
+    </div>`).join('');
+
+  list.innerHTML = `
     <div class="sensor-result">
       <div>
-        <strong>${r.event.location}</strong> — ${r.event.category}(${r.event.substance})
-        측정값 ${r.event.value}${r.event.unit} / 임계값 ${r.event.threshold}${r.event.unit}
-        <span class="severity ${r.judgement.severity}">${r.judgement.severity}</span>
+        <strong>${composite.location}</strong> — 센서 ${composite.events.length}개 종합 판정
         <span class="tag rule">rule</span>
       </div>
-      <p style="margin: 6px 0 4px;">${r.narrative}</p>
+      ${eventsHtml}
+      <p style="margin: 6px 0 4px;">${composite.narrative}</p>
       <details>
         <summary>결정 추적 보기</summary>
-        ${r.decisions.map(d => `
+        ${composite.decisions.map(d => `
           <div class="decision-row">
             <span class="tag ${d.authority}">${d.authority}</span>
             <strong>${d.action}</strong> — ${Object.entries(d.detail).map(([k,v]) => `${k}: ${v}`).join(', ')}
           </div>`).join('')}
       </details>
-      ${r.report ? `<div class="stat">사고 리포트 초안 생성됨 — 참고 문서: ${(r.report.guideline_sources||[]).join(', ') || '없음'}</div>` : ''}
-      <div class="feedback-area" style="margin-top:8px;">
-        <button type="button" class="fb-good" data-idx="${i}">👍 적절함</button>
-        <button type="button" class="fb-bad" data-idx="${i}">👎 수정 필요</button>
-        <textarea class="correction-box" placeholder="수정한 문장을 입력하세요" style="display:none; margin-top:6px;"></textarea>
-        <button type="button" class="fb-submit-bad" data-idx="${i}" style="display:none;">피드백 제출</button>
-      </div>
-    </div>`).join('');
+      ${composite.report ? `<div class="stat">사고 리포트 초안 생성됨 — 참고 문서: ${(composite.report.guideline_sources||[]).join(', ') || '없음'}</div>` : ''}
+    </div>`;
   document.getElementById('timing-line').textContent = `엣지 스펙: ${edgeLabel} · 총 처리시간 ${elapsed}초`;
   document.getElementById('results-box').style.display = 'block';
-
-  results.forEach((r, i) => {
-    const card = list.children[i];
-    card.querySelector('.fb-good').addEventListener('click', (e) => sendFeedback(e.target, r.event, r.narrative, 'good'));
-    card.querySelector('.fb-bad').addEventListener('click', () => {
-      card.querySelector('.correction-box').style.display = 'block';
-      card.querySelector('.fb-submit-bad').style.display = 'inline-block';
-    });
-    card.querySelector('.fb-submit-bad').addEventListener('click', (e) => sendFeedback(e.target, r.event, r.narrative, 'bad'));
-  });
 }
 
 function showError(msg) {
@@ -221,12 +207,12 @@ document.getElementById('run-btn').addEventListener('click', async () => {
     showError(narrateData.error);
     return;
   }
-  if (!narrateData.results || !narrateData.equipment) {
+  if (!narrateData.composite || !narrateData.equipment) {
     showError('서버가 예상과 다른 형태로 응답했습니다: ' + JSON.stringify(narrateData).slice(0, 300));
     return;
   }
   renderEquipment(narrateData.equipment);
-  renderResults(narrateData.results, narrateData.elapsed, narrateData.edge_label);
+  renderResults(narrateData.composite, narrateData.elapsed, narrateData.edge_label);
 });
 </script>
 {% endblock %}

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from llama_cpp import Llama
 
-from agent.run import run_agent, to_dict
+from agent.run import run_agent, run_agent_composite, to_dict, to_dict_composite
 from agent.tools import ToolContext
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -34,13 +34,21 @@ def main() -> None:
     ctx = ToolContext.load()
     llm = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=n_threads, n_gpu_layers=n_gpu_layers, verbose=False)
 
-    results = []
-    for event in events:
-        r = run_agent(event, ctx, llm)
-        results.append({"event": event, **to_dict(r)})
-        ctx.notify_log.clear()
+    # AGENT_COMPOSITE=1이면 여러 센서를 한 공간으로 간주해 LLM이 종합 의견 하나만 낸다
+    # (web/app.py의 /simulate 복합 모드, 2026-09-19). 안 켜져 있으면(control-room 등
+    # 기존 호출부는 이 값을 아예 안 넘김) 기존처럼 이벤트별로 독립 처리한다 — 하위 호환.
+    if os.environ.get("AGENT_COMPOSITE") == "1":
+        r = run_agent_composite(events, ctx, llm)
+        output = to_dict_composite(r)
+    else:
+        results = []
+        for event in events:
+            r = run_agent(event, ctx, llm)
+            results.append({"event": event, **to_dict(r)})
+            ctx.notify_log.clear()
+        output = results
 
-    Path(output_path).write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
+    Path(output_path).write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
 
 
 if __name__ == "__main__":

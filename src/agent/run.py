@@ -96,6 +96,50 @@ def preview(event: dict) -> dict:
     }
 
 
+def _run_llm_tool_loop(
+    messages: list[dict], ctx: ToolContext, llm: Llama, fallback_query: str, max_tool_turns: int,
+) -> tuple[str, list[dict], list[str], list[Decision]]:
+    """LLM에게 도구 호출 기회를 주고 최종 텍스트가 나올 때까지 반복한다. 단일 이벤트
+    (run_agent)와 복합 이벤트(run_agent_composite)가 완전히 같은 루프를 쓴다 — 도구 호출
+    처리 로직이 둘 다 동일해서 따로 둘 이유가 없다."""
+    tool_trace: list[dict] = []
+    guideline_sources: list[str] = []
+    decisions: list[Decision] = []
+    narrative = ""
+
+    for _ in range(max_tool_turns):
+        result = llm.create_chat_completion(
+            messages=messages, tools=_TOOLS_SCHEMA, temperature=0.0, max_tokens=400
+        )
+        msg = result["choices"][0]["message"]
+        content = msg.get("content") or ""
+        # 구조화된 tool_calls 필드를 먼저 보고, 없으면 텍스트에서 직접 파싱한다(위 설명 참고)
+        tool_calls = msg.get("tool_calls") or None
+        manual_calls = None if tool_calls else _extract_tool_calls(content)
+
+        if not tool_calls and not manual_calls:
+            narrative = content
+            break
+
+        messages.append({"role": "assistant", "content": content})
+
+        calls = tool_calls or [{"function": {"arguments": json.dumps(c["arguments"])}} for c in manual_calls]
+        for call in calls:
+            args = json.loads(call["function"]["arguments"])
+            query = args.get("query", fallback_query)
+            hits = tools.search_guidelines(ctx, query)
+            guideline_sources.extend(h["source"] for h in hits)
+            trace_entry = {"tool": "search_guidelines", "args": args, "result_count": len(hits)}
+            tool_trace.append(trace_entry)
+            decisions.append(Decision("llm", "tool_call", trace_entry))
+            messages.append({"role": "tool", "content": json.dumps(hits, ensure_ascii=False)})
+    else:
+        narrative = narrative or "(도구 호출 반복 한도 초과 — 최종 답변을 얻지 못함)"
+
+    decisions.append(Decision("llm", "compose_narrative", {"narrative": narrative}))
+    return narrative, tool_trace, guideline_sources, decisions
+
+
 def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3) -> dict:
     decisions: list[Decision] = []
 
@@ -145,40 +189,10 @@ def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3
         )},
     ]
 
-    tool_trace: list[dict] = []
-    guideline_sources: list[str] = []
-    narrative = ""
-
-    for _ in range(max_tool_turns):
-        result = llm.create_chat_completion(
-            messages=messages, tools=_TOOLS_SCHEMA, temperature=0.0, max_tokens=400
-        )
-        msg = result["choices"][0]["message"]
-        content = msg.get("content") or ""
-        # 구조화된 tool_calls 필드를 먼저 보고, 없으면 텍스트에서 직접 파싱한다(위 설명 참고)
-        tool_calls = msg.get("tool_calls") or None
-        manual_calls = None if tool_calls else _extract_tool_calls(content)
-
-        if not tool_calls and not manual_calls:
-            narrative = content
-            break
-
-        messages.append({"role": "assistant", "content": content})
-
-        calls = tool_calls or [{"function": {"arguments": json.dumps(c["arguments"])}} for c in manual_calls]
-        for call in calls:
-            args = json.loads(call["function"]["arguments"])
-            query = args.get("query", event["substance"])
-            hits = tools.search_guidelines(ctx, query)
-            guideline_sources.extend(h["source"] for h in hits)
-            trace_entry = {"tool": "search_guidelines", "args": args, "result_count": len(hits)}
-            tool_trace.append(trace_entry)
-            decisions.append(Decision("llm", "tool_call", trace_entry))
-            messages.append({"role": "tool", "content": json.dumps(hits, ensure_ascii=False)})
-    else:
-        narrative = narrative or "(도구 호출 반복 한도 초과 — 최종 답변을 얻지 못함)"
-
-    decisions.append(Decision("llm", "compose_narrative", {"narrative": narrative}))
+    narrative, tool_trace, guideline_sources, tool_decisions = _run_llm_tool_loop(
+        messages, ctx, llm, event["substance"], max_tool_turns,
+    )
+    decisions.extend(tool_decisions)
 
     # 알림/에스컬레이션/리포트 실행 여부는 코드가 위험도로 직접 결정한다 (LLM에게 안 맡김)
     tools.notify(ctx, channel="현장관리자-알림방", message=narrative)
@@ -203,6 +217,114 @@ def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3
     }
 
 
+_COMPOSITE_SYSTEM_PROMPT = (
+    "당신은 산업 현장 안전관리 보조 에이전트입니다. 한 공간에 설치된 여러 센서의 측정값을 "
+    "한꺼번에 받습니다. 센서마다 따로 코멘트하지 말고, 전체 상황을 종합해서 이 공간이 지금 "
+    "얼마나 안전한지 하나의 의견으로 정리하세요. 가장 위험도가 높은 항목을 중심으로 설명하되 "
+    "다른 항목도 함께 언급하세요. 판정(초과 여부·위험도)과 장비 조치 실행 여부는 이미 시스템이 "
+    "정했으니 당신은 다시 판정하거나 새로운 장비 조치를 지시하지 말고, 전달받은 사실을 "
+    "종합 안내문에 반영해서 설명만 하세요."
+)
+
+
+def _composite_event_lines(judged: list[tuple[dict, rules.Judgement]]) -> str:
+    lines = []
+    for event, judgement in judged:
+        direction = "낮을수록 위험한 지표" if event.get("lower_is_worse") else "높을수록 위험한 지표"
+        lines.append(
+            f"- {event['category']}센서({event['substance']}, {direction}): "
+            f"측정값 {event['value']}{event['unit']}, 임계값 {event['threshold']}{event['unit']}, "
+            f"판정: {judgement.severity.value}"
+        )
+    return "\n".join(lines)
+
+
+def run_agent_composite(events: list[dict], ctx: ToolContext, llm: Llama, max_tool_turns: int = 3) -> dict:
+    """여러 센서가 같은 공간에 있다고 가정하고, LLM이 센서마다 따로 코멘트하는 대신 전체를
+    종합한 의견 하나를 낸다(사용자 요청, 2026-09-19 — "/simulate"의 여러 센서를 한 공간으로
+    간주). 판정·장비 제어는 기존 run_agent와 동일하게 센서(물질)별로 독립 처리한다 — 물질마다
+    임계값·위험 기준이 달라서 그 판정 자체를 하나로 뭉개면 틀린 결과가 나온다. 종합되는 건
+    "LLM이 마지막에 내놓는 설명" 한 곳뿐이다."""
+    if not events:
+        raise ValueError("events가 비어있음")
+
+    decisions: list[Decision] = []
+    judged: list[tuple[dict, rules.Judgement]] = []
+    for event in events:
+        judgement = rules.judge(event["value"], event["threshold"], event.get("lower_is_worse", False))
+        judged.append((event, judgement))
+        decisions.append(Decision("rule", "judge", {
+            "substance": event["substance"], "severity": judgement.severity.value, "ratio": round(judgement.ratio, 2),
+        }))
+
+    location = events[0]["location"]
+    exceeded = [(e, j) for e, j in judged if j.exceeded]
+
+    if not exceeded:
+        return {
+            "location": location, "judged": judged,
+            "narrative": f"{location}의 모든 센서가 정상 범위입니다.",
+            "tool_trace": [], "equipment_status": [], "notify_log": [], "report": None,
+            "decisions": decisions,
+        }
+
+    # 장비 제어는 초과한 센서마다 독립적으로 즉시 실행(기존과 동일 원칙, LLM 서술 이전에 처리)
+    equipment_status: list[dict] = []
+    for event, judgement in exceeded:
+        for action in rules.required_equipment_actions(event["category"], judgement.severity):
+            record = (
+                tools.actuate_equipment(ctx, action) if action.risk == rules.Risk.LOW
+                else tools.request_equipment_approval(ctx, action)
+            )
+            equipment_status.append(record)
+            decisions.append(Decision("rule", "equipment", record))
+
+    equipment_summary = (
+        "; ".join(f"{r['equipment']}({r['status']})" for r in equipment_status)
+        if equipment_status else "해당 없음"
+    )
+    messages = [
+        {"role": "system", "content": _COMPOSITE_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"{location}에 설치된 센서들의 측정 결과:\n{_composite_event_lines(judged)}\n\n"
+            f"이미 자동으로 처리된 장비 조치(사실, 그대로 인용할 것): {equipment_summary}"
+        )},
+    ]
+
+    narrative, tool_trace, guideline_sources, tool_decisions = _run_llm_tool_loop(
+        messages, ctx, llm, exceeded[0][0]["substance"], max_tool_turns,
+    )
+    decisions.extend(tool_decisions)
+
+    tools.notify(ctx, channel="현장관리자-알림방", message=narrative)
+    decisions.append(Decision("rule", "notify", {"channel": "현장관리자-알림방"}))
+
+    report = None
+    danger = [(e, j) for e, j in exceeded if j.severity == rules.Severity.DANGER]
+    if danger:
+        reasons = ", ".join(e["substance"] for e, _ in danger)
+        tools.escalate(ctx, reason=f"{reasons} 위험 수준 감지")
+        decisions.append(Decision("rule", "escalate", {"reason": reasons}))
+        # 리포트 양식은 이벤트 하나를 기준으로 하므로, 여럿 중 가장 심한(ratio가 가장 큰)
+        # 것을 대표로 삼는다 — narrative 자체는 이미 종합 서술이라 리포트 본문엔 그대로 실림.
+        worst_event, worst_judgement = max(danger, key=lambda pair: pair[1].ratio)
+        report = tools.draft_incident_report(
+            ctx, worst_event, worst_judgement, narrative, list(dict.fromkeys(guideline_sources))
+        )
+        decisions.append(Decision("rule", "draft_incident_report", {}))
+
+    return {
+        "location": location,
+        "judged": judged,
+        "narrative": narrative,
+        "tool_trace": tool_trace,
+        "equipment_status": equipment_status,
+        "notify_log": list(ctx.notify_log),
+        "report": report,
+        "decisions": decisions,
+    }
+
+
 def to_dict(result: dict) -> dict:
     """run_agent() 결과를 JSON 직렬화 가능한 순수 dict로 바꾼다 — 데이터클래스/Enum이
     섞여 있어서 그대로 json.dumps 하면 실패한다. 웹앱(in-process)과 run_cli.py(서브프로세스,
@@ -213,6 +335,26 @@ def to_dict(result: dict) -> dict:
             "ratio": round(result["judgement"].ratio, 2),
             "exceeded": result["judgement"].exceeded,
         },
+        "narrative": result["narrative"],
+        "tool_trace": result["tool_trace"],
+        "equipment_status": result.get("equipment_status", []),
+        "report": result["report"],
+        "decisions": [{"authority": d.authority, "action": d.action, "detail": d.detail} for d in result["decisions"]],
+    }
+
+
+def to_dict_composite(result: dict) -> dict:
+    """run_agent_composite() 결과를 JSON 직렬화 가능한 dict로 바꾼다 — to_dict()와 같은
+    이유, 다만 이벤트가 여러 개라 judged를 통째로 events 리스트로 펼친다."""
+    return {
+        "location": result["location"],
+        "events": [
+            {
+                "event": e,
+                "judgement": {"severity": j.severity.value, "ratio": round(j.ratio, 2), "exceeded": j.exceeded},
+            }
+            for e, j in result["judged"]
+        ],
         "narrative": result["narrative"],
         "tool_trace": result["tool_trace"],
         "equipment_status": result.get("equipment_status", []),

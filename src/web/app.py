@@ -32,7 +32,7 @@ from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent import rules
-from agent.run import preview, run_agent, to_dict
+from agent.run import preview, run_agent, run_agent_composite, to_dict, to_dict_composite
 from agent.tools import ToolContext
 from collect import registry as collect_registry
 from collect.storage import collection_summary
@@ -401,10 +401,12 @@ _CATEGORY_SUBSTANCES_JSON = json.dumps(_CATEGORY_SUBSTANCES, ensure_ascii=False)
 _FEEDBACK_PATH = _ROOT / "data" / "processed" / "feedback.jsonl"
 
 
-def _default_location(idx: int) -> str:
-    """위치 입력을 없앤 대신, 센서 슬롯 번호로 결정론적으로 위치를 배정한다 — 데모
-    편의를 위한 placeholder이지 실제 위치 정보가 아니다."""
-    return LOCS[(idx - 1) % len(LOCS)]
+def _default_location() -> str:
+    """위치 입력을 없앤 대신 고정 위치를 배정한다 — 데모 편의를 위한 placeholder이지
+    실제 위치 정보가 아니다. 활성화된 센서 전부가 같은 공간에 있다고 가정하므로
+    (2026-09-19, 복합 센서 시뮬레이션) 슬롯마다 다른 위치를 주던 예전 방식과 달리
+    한 요청 안에서는 항상 같은 값 하나를 쓴다."""
+    return LOCS[0]
 
 
 def _value_for_ratio(substance: str, threshold: float, ratio: float) -> float:
@@ -422,7 +424,7 @@ def _value_for_ratio(substance: str, threshold: float, ratio: float) -> float:
     return round(value, 2)
 
 
-def _severity_to_event(category: str, substance: str, severity: str, idx: int) -> dict | None:
+def _severity_to_event(category: str, substance: str, severity: str, location: str) -> dict | None:
     lookup = substance_lookup(category, substance)
     if not lookup:
         return None
@@ -431,14 +433,18 @@ def _severity_to_event(category: str, substance: str, severity: str, idx: int) -
     value = _value_for_ratio(substance, threshold, ratio)
     return {
         "category": category, "substance": substance, "value": value, "threshold": threshold,
-        "unit": unit, "location": _default_location(idx), "lower_is_worse": is_lower_is_worse(substance),
+        "unit": unit, "location": location, "lower_is_worse": is_lower_is_worse(substance),
     }
 
 
 def _events_from_payload(sensors: list[dict]) -> list[dict]:
+    """활성화된 센서 전부가 같은 공간(location)에 있다고 가정한다 — "복합 센서"
+    시뮬레이션(2026-09-19, 사용자 요청)의 전제라 여기서 위치를 한 번만 정해서 전체
+    센서에 똑같이 준다."""
+    location = _default_location()
     events = []
-    for idx, s in enumerate(sensors, start=1):
-        event = _severity_to_event(s.get("category", ""), s.get("substance", ""), s.get("severity", "정상"), idx)
+    for s in sensors:
+        event = _severity_to_event(s.get("category", ""), s.get("substance", ""), s.get("severity", "정상"), location)
         if event:
             events.append(event)
     return events
@@ -452,13 +458,14 @@ def _aggregate_equipment(results: list[dict]) -> list[dict]:
     return [{"equipment": name, "status": status[name]} for name in _ALL_EQUIPMENT]
 
 
-def _run_events_inprocess(events: list[dict], llm) -> list[dict]:
-    results = []
-    for event in events:
-        r = run_agent(event, _state["ctx"], llm)
-        results.append({"event": event, **to_dict(r)})
-        _state["ctx"].notify_log.clear()
-    return results
+def _run_events_inprocess_composite(events: list[dict], llm) -> dict:
+    """활성화된 센서 전부를 한 공간으로 보고 LLM이 종합 의견 하나를 내게 한다
+    (run_agent_composite, 2026-09-19). 이 함수는 /api/narrate의 in-process 경로에서만
+    쓰인다 — control-room은 항상 이벤트 하나짜리 run_agent를 별도로 직접 호출한다."""
+    r = run_agent_composite(events, _state["ctx"], llm)
+    result = to_dict_composite(r)
+    _state["ctx"].notify_log.clear()
+    return result
 
 
 def _pick_inprocess_llm(profile: dict):
@@ -470,13 +477,17 @@ def _pick_inprocess_llm(profile: dict):
     return _state["llm"], _llm_lock
 
 
-def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool) -> list[dict]:
+def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool, composite: bool = False) -> list[dict] | dict:
     """엣지 스펙 에뮬레이션 — 별도 프로세스를 systemd-run(cgroup)+taskset으로 감싸서
     실제로 그 코어 수·메모리로 제한된 조건에서 돌린다(로드맵 7번, 의사결정_로그 32번과
     동일한 방법). 매번 모델을 새로 불러와서 인프로세스보다 느리지만, 숫자가 진짜다.
     gpu=True면 AGENT_GPU 환경변수로 서브프로세스(agent/run_cli.py)에 전달해서 그
     안에서 n_gpu_layers=-1로 새로 모델을 띄우게 한다 — taskset의 CPU 코어 제한은
-    GPU/PCIe 접근과 무관해서 같이 걸어도 문제없다."""
+    GPU/PCIe 접근과 무관해서 같이 걸어도 문제없다.
+
+    composite=True면 AGENT_COMPOSITE=1을 넘겨서 agent/run_cli.py가 이벤트 전체를 하나의
+    종합 결과(dict)로 처리·반환하게 한다(2026-09-19). 기본값 False는 control-room처럼
+    이벤트 하나짜리 리스트를 그대로 기대하는 기존 호출부를 그대로 보존하기 위함."""
     core_list = ",".join(str(i) for i in range(cores))
     python_bin = _ROOT / ".venv" / "bin" / "python"
 
@@ -495,7 +506,10 @@ def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool)
         ]
         proc = subprocess.run(
             cmd, cwd=str(_ROOT), timeout=180, capture_output=True, text=True,
-            env={**os.environ, "PYTHONPATH": str(_ROOT / "src"), "AGENT_THREADS": str(cores), "AGENT_GPU": "1" if gpu else "0"},
+            env={
+                **os.environ, "PYTHONPATH": str(_ROOT / "src"), "AGENT_THREADS": str(cores),
+                "AGENT_GPU": "1" if gpu else "0", "AGENT_COMPOSITE": "1" if composite else "0",
+            },
         )
         if proc.returncode != 0 or not output_path.exists():
             raise RuntimeError(f"엣지 에뮬레이션 실행 실패(exit {proc.returncode}): {proc.stderr[-1500:]}")
@@ -551,21 +565,22 @@ async def api_narrate(request: Request):
         if profile["cores"] is None:
             llm, lock = _pick_inprocess_llm(profile)
             with lock:
-                results = _run_events_inprocess(events, llm)
+                composite_result = _run_events_inprocess_composite(events, llm)
         else:
-            results = _run_events_emulated(events, profile["cores"], profile["mem_gb"], profile.get("gpu", False))
+            composite_result = _run_events_emulated(
+                events, profile["cores"], profile["mem_gb"], profile.get("gpu", False), composite=True,
+            )
     except Exception as exc:  # noqa: BLE001 — 데모 화면에 원인을 그대로 보여주기 위함
         METRIC_NARRATE_ERRORS.inc()
         return JSONResponse({"error": str(exc)}, status_code=500)
     elapsed = round(time.perf_counter() - start, 2)
     METRIC_NARRATE_LATENCY.labels(edge_profile=profile_key).observe(elapsed)
-    for r in results:
-        for e in r.get("equipment_status", []):
-            METRIC_EQUIPMENT_ACTUATED.labels(equipment=e["equipment"], status=e["status"]).inc()
+    for e in composite_result.get("equipment_status", []):
+        METRIC_EQUIPMENT_ACTUATED.labels(equipment=e["equipment"], status=e["status"]).inc()
 
     return JSONResponse({
-        "results": results,
-        "equipment": _aggregate_equipment(results),
+        "composite": composite_result,
+        "equipment": _aggregate_equipment([composite_result]),
         "elapsed": elapsed,
         "edge_label": profile["label"],
     })
@@ -828,11 +843,20 @@ async def edu_admin_train(request: Request):
     if current.get("status") == "running":
         return JSONResponse({"error": "이미 학습이 진행 중입니다"}, status_code=409)
 
+    # 그냥 subprocess.Popen만 쓰면 systemd가 mlops-web 서비스를 cgroup째로 관리하기
+    # 때문에, 배포 중 `systemctl restart mlops-web`이 뜨면 이 자식 프로세스도 같이
+    # 죽는다(2026-09-19 실제로 겪음 — 학습 도중 다른 기능을 배포했더니 학습이 조용히
+    # 죽어있었음). systemd-run --scope로 별도 스코프에 띄우면 mlops-web과 생명주기가
+    # 분리돼 배포가 학습을 방해하지 않는다(엣지 에뮬레이션에 쓰던 패턴과 동일).
     subprocess.Popen(
-        [str(_EDU_PYTHON_BIN), "-m", "train.run_edu_training_job", "--sources", ",".join(selected)],
+        [
+            "systemd-run", "--user", "--scope", "--quiet", "--",
+            str(_EDU_PYTHON_BIN), "-m", "train.run_edu_training_job", "--sources", ",".join(selected),
+        ],
         cwd=str(_ROOT),
         env={**os.environ, "PYTHONPATH": str(_ROOT / "src")},
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     return JSONResponse({"status": "started", "sources": selected})
 
