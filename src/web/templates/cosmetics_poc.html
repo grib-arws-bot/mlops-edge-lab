@@ -197,7 +197,12 @@ let currentTickData = null; // {발효온도_C, pH_최종, DO_평균_pct, 교반
 let mode = 'normal'; // 'normal' | 'worsening' — 다음 시점을 어느 방향으로 생성할지
 let tickCount = 0;
 let abnormalStreak = 0; // 연속 이상 시점 수(0=정상, 1=방금 감지, 2 이상=미조치 지속)
-let approved = false;
+// 승인 대기 중인 이상 판단이 있는지 — 예전엔 "approved"가 한 번 true가 되면 시나리오
+// 전체가 끝나는 1회성 플래그였는데, 데이터가 계속 흐르는 지금 구조에선 승인 후에도
+// 시뮬레이션이 계속돼야 맞다("악화로 간 이후에 운영자 조치를 해도 새 데이터가 생성되지
+// 않는다"는 실측 지적, 2026-09-20). 그래서 "시나리오가 끝났는지"가 아니라 "지금 이
+// 판단에 대한 승인 버튼을 보여줄지"만 나타내는 값으로 바꿨다.
+let pendingApproval = false;
 const logRows = [];
 // "처음부터"를 누를 때마다 1씩 증가 — 그 이전에 시작된 비동기 호출(LLM 응답 대기 중)이
 // 나중에 돌아와도 이 값이 바뀌었으면 자기 결과를 화면에 반영하지 않고 조용히 버린다.
@@ -253,7 +258,7 @@ function renderStage2() {
 function modelStatuses(tick) {
   const doVal = tick.DO_평균_pct;
   const phVal = tick.pH_최종;
-  const gruAbnormal = !approved && trendAbnormal();
+  const gruAbnormal = trendAbnormal();
   const doAbnormal = doVal < SOP_DO_MIN;
   const isoAbnormal = doVal < SOP_DO_MIN && phVal < 4.5;
   return [
@@ -323,7 +328,7 @@ function renderStage4() {
     <strong style="font-size:0.85rem;">${escapeHtml(latest.label)}</strong>
     ${renderEntryDetail(latest)}
   </div>`;
-  const approveHtml = !approved
+  const approveHtml = pendingApproval
     ? `<button id="approve-btn" style="margin-top:6px; width:100%;" ${latest.loading ? 'disabled' : ''}>운영자 조치 승인 → 교반 RPM 상향</button>`
     : '';
   const historyHtml = agentHistory.length > 1
@@ -403,6 +408,7 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
   // 응답을 기다리는 사이 "처음부터"가 눌려 다른 시나리오가 시작됐으면, 이 늦게 도착한
   // 결과는 화면에 반영하지 않는다(scenarioGen 방식 — 위 선언부 주석 참고).
   if (myGen !== scenarioGen) return;
+  pendingApproval = true;
   renderStage4();
   // 판단이 나온 시점엔 자동 진행을 멈춰 운영자가 승인/방치를 직접 고르게 한다. 데이터
   // 생성(Layer 1~3)은 이 호출이 도는 동안에도 계속됐으므로, 여기서 멈추는 건 "자동
@@ -410,24 +416,24 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
   stopAuto();
 }
 
+// 승인해도 시나리오는 끝나지 않는다 — 정상으로 돌아간 뒤에도 시뮬레이션은 계속되고,
+// 운영자는 다시 "악화 시작"을 눌러 새 이상 상황을 만들 수 있다("악화로 간 이후에
+// 운영자 조치를 해도 새로운 데이터가 생성되지 않는다"는 실측 지적, 2026-09-20 — 예전엔
+// 승인이 시나리오를 영구 종료시키는 1회성 동작이었다).
 function approveAction() {
-  approved = true;
+  pendingApproval = false;
   stopAuto();
+  mode = 'normal';
+  tickCount++;
   const tick = recoveryTick(currentTickData || randomStartTick());
   currentTickData = tick;
   abnormalStreak = 0;
-  tickCount++;
   pushLog(tick, '운영자 승인 → 교반 RPM 상향, DO 회복 확인');
   renderStage1(tick);
   renderStage2();
   renderStage3(tick);
   agentHistory.unshift({ label: '✅ 조치 완료', loading: false, synthetic: true, narrative: '운영자 승인 반영 — 교반 RPM 상향, Layer 1 장비 상태에 반영되었습니다.' });
   renderStage4();
-  const advBtn = document.getElementById('advance-btn');
-  advBtn.disabled = true;
-  advBtn.textContent = '시나리오 종료';
-  document.getElementById('worsen-btn').disabled = true;
-  document.getElementById('normalize-btn').disabled = true;
 }
 
 // 데이터 생성(Layer 1~3)과 LLM 호출(Layer 4)을 분리한다. 예전엔 advanceTick()이 LLM
@@ -436,7 +442,6 @@ function approveAction() {
 // 그래서 agentRecommendation은 기다리지 않고 "발사 후 잊기"로 돌리되, agentBusy로
 // 중복 호출만 막는다(2026-09-20).
 function advanceTick() {
-  if (approved) return;
   const myGen = scenarioGen;
   tickCount++;
   const base = currentTickData || randomStartTick();
@@ -456,13 +461,13 @@ function advanceTick() {
     }
     // agentBusy가 이미 true면(이전 이상감지에 대한 판단이 아직 진행 중) 새로 호출하지
     // 않는다 — 그 응답이 오면 triggerAgentRecommendation이 알아서 자동진행을 멈춘다.
-  } else if (!agentBusy) {
-    renderStage4Idle('이상 없음 — 대기 중');
+  } else {
+    pendingApproval = false;
+    if (!agentBusy) renderStage4Idle('이상 없음 — 대기 중');
   }
 }
 
 function setMode(newMode) {
-  if (approved) return;
   mode = newMode;
   advanceTick(); // 누르는 즉시 그 방향으로 한 시점 생성해서 바로 보여준다
 }
@@ -473,7 +478,7 @@ let autoRunning = false;
 // 누르면, 리셋 전에 시작된 옛 루프가 sleep에서 깨어났을 때 autoRunning이 이미 새
 // 루프에 의해 다시 true가 돼 있을 수 있다 — 세대가 다르면 옛 루프는 그냥 멈춘다.
 async function runAutoLoop(myGen) {
-  while (autoRunning && myGen === scenarioGen && !approved) {
+  while (autoRunning && myGen === scenarioGen) {
     advanceTick();
     await new Promise(r => setTimeout(r, AUTO_INTERVAL_MS));
   }
@@ -481,7 +486,7 @@ async function runAutoLoop(myGen) {
 }
 
 function startAuto() {
-  if (autoRunning || approved) return;
+  if (autoRunning) return;
   autoRunning = true;
   document.getElementById('auto-toggle').textContent = '자동 진행 정지 ⏸';
   runAutoLoop(scenarioGen);
@@ -507,7 +512,7 @@ function resetScenario() {
   mode = 'normal';
   tickCount = 0;
   abnormalStreak = 0;
-  approved = false;
+  pendingApproval = false;
   logRows.length = 0;
   agentHistory.length = 0;
   document.getElementById('advance-btn').disabled = false;
