@@ -37,7 +37,9 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from agent import rules
+from agent import cosmetics_tools, rules
+from agent.cosmetics_run import run_cosmetics_agent
+from agent.cosmetics_tools import CosmeticsToolContext
 from agent.run import preview, run_agent, run_agent_composite, to_dict, to_dict_composite
 from agent.tools import ToolContext
 from collect import registry as collect_registry
@@ -154,6 +156,7 @@ def _load_edu_rag_or_disable() -> None:
 async def lifespan(_app: FastAPI):
     _cleanup_orphaned_edge_scopes()
     _state["ctx"] = ToolContext.load()
+    _state["cosmetics_ctx"] = CosmeticsToolContext()
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
     _load_gpu_llm_or_disable_gpu_profiles()
     _load_edu_rag_or_disable()
@@ -481,6 +484,57 @@ def _quality_eval_summary() -> dict:
 @app.get("/quality", response_class=HTMLResponse)
 def quality(request: Request):
     return templates.TemplateResponse(request, "quality.html", _quality_eval_summary())
+
+
+# ────────────────────────────────────────────────────────────────
+# 화장품 제조 AX PoC (강원정보문화산업진흥원 제안서 Layer 4 검증) — concept 검증용,
+# 사용자 결정으로 프로덕션 견고함을 추구하지 않음(2026-09-20). Layer 1~3은 전부
+# mock(agent/cosmetics_tools.py 참고) — 실제 장비·모델과 연동하지 않는다.
+# ────────────────────────────────────────────────────────────────
+@app.get("/cosmetics-poc", response_class=HTMLResponse)
+def cosmetics_poc_page(request: Request):
+    return templates.TemplateResponse(request, "cosmetics_poc.html", {})
+
+
+@app.get("/api/cosmetics/lots")
+def cosmetics_lots(lot_id: str | None = None, process: str | None = None):
+    """Layer 2(RDB) REST 조회 — 제안서 데이터연계표의 "RDB/모델서빙 ↔ 대시보드·에이전트:
+    REST API" 계약과 동일한 형태. Agent 내부에서도 이 핸들러가 감싸는 함수를 직접
+    호출하지만(같은 프로세스 안이라 자연스러운 설계), curl로 이 라우트만 따로 호출해도
+    동일한 응답을 받는다 — "진짜 REST API"라는 걸 독립적으로 확인 가능."""
+    return JSONResponse(cosmetics_tools.query_lot(lot_id=lot_id, process=process))
+
+
+@app.post("/api/cosmetics/predict")
+async def cosmetics_predict(request: Request):
+    """Layer 3(AI 분석층) REST 호출 — **mock**. 실제 배포에서 이 라우트 내부만 진짜
+    추론 서버 호출로 바꾸면, 호출부(Agent)는 변경 없이 그대로 쓸 수 있도록 인터페이스만
+    미리 맞춰둔 것."""
+    payload = await request.json()
+    return JSONResponse(cosmetics_tools.predict_condition(process=payload.get("process", "")))
+
+
+@app.post("/api/cosmetics/ask")
+async def cosmetics_ask(request: Request):
+    """Layer 4(AI 에이전트) — 자연어 질문을 받아 도구 호출 루프를 실행하고, Layer 1~4
+    파이프라인 시각화에 쓸 단계별 트레이스와 최종 답변을 반환한다."""
+    payload = await request.json()
+    question = (payload.get("question") or "").strip()
+    if not question:
+        return JSONResponse({"error": "질문을 입력하세요"}, status_code=400)
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        with _llm_lock:
+            return run_cosmetics_agent(question, _state["cosmetics_ctx"], _state["llm"])
+
+    try:
+        result = await loop.run_in_executor(None, _run)
+    except Exception as exc:  # noqa: BLE001 — 조용한 실패 금지
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    return JSONResponse(result)
 
 
 _MAX_SENSORS = 4

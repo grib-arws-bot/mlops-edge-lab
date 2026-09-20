@@ -1,0 +1,164 @@
+"""화장품 제조 AX PoC(강원정보문화산업진흥원 제안서 Layer 4 검증용) — Agent가 호출하는
+도구 3종과, 그 아래 Layer 1~3을 흉내 내는 mock 데이터.
+
+**이 파일 전체가 concept 검증용이다** — 나중에 실제 프로젝트를 시작하면 완전히 새로운
+서버에 다시 구축할 예정이라, 여기서는 프로덕션 수준의 견고함을 추구하지 않는다
+(사용자 결정, 2026-09-20).
+
+**Layer 1~3을 흉내 내는 방식**:
+- Layer 1(장비)+Layer 2(RDB) → `LOT_DATA`(정적 JSON, cosmetics/lot_data.json)로 통째로
+  대체. Agent 입장에선 "이미 수집·저장까지 끝난 데이터를 조회"하는 것뿐이라 실시간 스트림을
+  흉내 낼 필요가 없다. 각 측정값에 실제 제안서(슬라이드 10 요구사항분석)에 나온 진짜
+  센서명을 태그로 붙여서, 어느 장비에서 나온 값인지 추적 가능하게 한다.
+- Layer 3(AI 예측모델) → 두 갈래로 나눈다.
+  ① 과거 배치의 판정·원인 — 이미 계산이 끝난 결과이므로 LOT_DATA에 미리 박아둔
+     `판정`/`비고` 필드를 그대로 반환(추가 추론 불필요).
+  ② 아직 안 일어난 배치에 대한 추천값 — `predict_condition()`이 SOP 문서의 기준값을
+     그대로 읽어와 반환하는 **규칙 기반 스텁**이다. 실제 XGBoost/GRU 모델이 아니다 —
+     이 사실을 함수 반환값(`mock: True`)과 화면(도구 호출 추적)에 명시해서, 데모를 보고
+     실제 학습된 모델이 있다고 오해하지 않게 한다(합성 데이터는 합성이라고 명시하는 이
+     프로젝트 전체의 원칙과 동일).
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import faiss
+from sentence_transformers import SentenceTransformer
+
+from rag.build_index import EMBED_MODEL
+from rag.query import retrieve
+
+_ROOT = Path(__file__).resolve().parents[2]
+_LOT_DATA_PATH = _ROOT / "cosmetics" / "lot_data.json"
+_SOP_INDEX_PATH = _ROOT / "data" / "processed" / "cosmetics_index.faiss"
+_SOP_META_PATH = _ROOT / "data" / "processed" / "cosmetics_chunks.jsonl"
+
+
+@dataclass
+class CosmeticsToolContext:
+    """agent/tools.py의 ToolContext와 같은 지연 로드 패턴 — search_sop이 실제로
+    호출될 때만 임베딩 모델·인덱스를 로드한다."""
+
+    embed_model: SentenceTransformer | None = None
+    index: object = None
+    meta: list[dict] | None = None
+
+    def _ensure_loaded(self) -> None:
+        if self.embed_model is None:
+            self.embed_model = SentenceTransformer(EMBED_MODEL)
+            self.index = faiss.read_index(str(_SOP_INDEX_PATH))
+            text = _SOP_META_PATH.read_text(encoding="utf-8")
+            self.meta = [json.loads(line) for line in text.split("\n") if line.strip()]
+
+
+def search_sop(ctx: CosmeticsToolContext, query: str, top_k: int = 3) -> list[dict]:
+    """Layer 4 지식베이스 검색 도구 — SOP 문서에서 관련 조항을 찾는다. rag/query.py의
+    retrieve()를 그대로 재사용(인덱스만 화장품 도메인 것으로 교체)."""
+    ctx._ensure_loaded()
+    hits = retrieve(query, ctx.embed_model, ctx.index, ctx.meta, top_k=top_k)
+    return [{"source": h["source"], "text": h["text"]} for h, score in hits]
+
+# 제안서 슬라이드 10(요구사항 분석 — 필요센서 및 통신방식)에 실제로 나온 센서 목록을
+# 그대로 옮겨온 것 — 지어낸 장비가 아니다.
+EQUIPMENT_MAP: dict[str, dict[str, dict[str, str]]] = {
+    "천연물 추출": {
+        "추출온도_C": {"장비": "Pt100 RTD 온도센서", "통신": "4-20mA→PLC AI 모듈"},
+        "교반RPM": {"장비": "로터리 인코더", "통신": "RS-485(Modbus RTU)"},
+        "손실률_pct": {"장비": "로드셀 + 중량 인디케이터", "통신": "RS-485(Modbus RTU)"},
+        "HPLC지표성분_pct": {"장비": "HPLC 분석장비(연구소)", "통신": "수기입력 연동"},
+    },
+    "미생물 발효": {
+        "발효온도_C": {"장비": "Pt100 RTD 온도센서", "통신": "4-20mA→PLC AI 모듈"},
+        "pH_최종": {"장비": "pH 전극(유리전극)", "통신": "RS-485(Modbus RTU)"},
+        "DO_평균_pct": {"장비": "DO 전극(격막형/광학식)", "통신": "4-20mA"},
+        "교반RPM": {"장비": "로터리 인코더", "통신": "RS-485(Modbus RTU)"},
+    },
+    "초고압 나노분산": {
+        "인가압력_bar": {"장비": "고압용 압력 트랜스미터", "통신": "설비 MES Data 활용"},
+        "D50_nm": {"장비": "DLS 분석장비(입도크기)", "통신": "별도 계측기 연계"},
+        "PDI": {"장비": "DLS 분석장비(입도크기)", "통신": "별도 계측기 연계"},
+        "제타전위_mV": {"장비": "DLS 분석장비(입도크기)", "통신": "별도 계측기 연계"},
+    },
+}
+
+# predict_condition()이 참조하는 SOP 기준값 — cosmetics/sop/*.txt에 적힌 값을 그대로
+# 코드로 옮긴 것(원문 대조 가능). RAG 검색과 별개로, 구조화된 "추천값 조회"를 흉내 내려면
+# 숫자 자체가 코드에도 있어야 한다.
+_SOP_RANGES = {
+    "천연물 추출": {
+        "추출온도_C": (65, 70), "승온시간_분": (30, 40), "가열유지시간_분": (90, 120),
+        "교반RPM": (40, 60), "출처": "SOP-EXT-01",
+    },
+    "미생물 발효": {
+        "발효온도_C": (28, 32), "pH_초기": (5.5, 6.0), "pH_목표": (4.0, 4.5),
+        "DO_최소_pct": (20, None), "교반RPM": (100, 150), "출처": "SOP-FMT-01",
+    },
+    "초고압 나노분산": {
+        "인가압력_저점도_bar": (1000, 1200), "인가압력_고점도_bar": (1200, 1500),
+        "Pass횟수": (2, 4), "냉각수온도_C": (15, 20), "출처": "SOP-NDP-01",
+    },
+}
+
+
+def _load_lots() -> list[dict]:
+    data = json.loads(_LOT_DATA_PATH.read_text(encoding="utf-8"))
+    return data["lots"]
+
+
+def query_lot(lot_id: str | None = None, process: str | None = None, 판정: str | None = None) -> dict:
+    """Layer 2(RDB) 조회 도구 — REST 계약은 GET /api/cosmetics/lots와 동일하다(app.py
+    라우트가 이 함수를 그대로 감싼다). lot_id를 주면 단건, 아니면 process/판정으로 필터링한
+    목록을 반환한다. 각 필드에 Layer 1 장비 출처(EQUIPMENT_MAP)를 같이 실어서, 프론트가
+    "이 값이 어느 센서에서 왔는지"를 보여줄 수 있게 한다."""
+    lots = _load_lots()
+    if lot_id:
+        lots = [l for l in lots if l["lot_id"] == lot_id]
+    if process:
+        lots = [l for l in lots if l["process"] == process]
+    if 판정:
+        lots = [l for l in lots if l["판정"] == 판정]
+
+    equipment_trace = []
+    for lot in lots:
+        eqmap = EQUIPMENT_MAP.get(lot["process"], {})
+        for field, spec in eqmap.items():
+            if field in lot:
+                equipment_trace.append({
+                    "lot_id": lot["lot_id"], "필드": field, "값": lot[field],
+                    "장비": spec["장비"], "통신": spec["통신"],
+                })
+
+    return {"lots": lots, "count": len(lots), "equipment_trace": equipment_trace}
+
+
+def predict_condition(process: str, **hint) -> dict:
+    """Layer 3(AI 분석층) mock 호출 도구 — REST 계약은 POST /api/cosmetics/predict와
+    동일하다. **실제 학습된 모델이 아니다** — SOP 기준값(_SOP_RANGES)의 중간값을 그대로
+    반환하는 규칙 기반 스텁이다. 제안서의 4종 모델(XGBoost/GRU/물리모델+RF/Isolation
+    Forest)이 실제로 자리할 위치를 인터페이스만 미리 잡아둔 것."""
+    ranges = _SOP_RANGES.get(process)
+    if not ranges:
+        return {"error": f"알 수 없는 공정: {process}", "mock": True}
+
+    recommended = {}
+    for key, val in ranges.items():
+        if key == "출처":
+            continue
+        if isinstance(val, tuple):
+            lo, hi = val
+            if hi is None:
+                recommended[key] = f"{lo} 이상"
+            else:
+                recommended[key] = round((lo + hi) / 2, 1)
+
+    return {
+        "process": process,
+        "recommended_condition": recommended,
+        "근거_SOP": ranges.get("출처"),
+        "mock": True,
+        "mock_설명": "실제 XGBoost/GRU 등 학습된 모델이 아니라, SOP 기준값 범위의 중간값을 반환하는 규칙 기반 스텁입니다.",
+    }
