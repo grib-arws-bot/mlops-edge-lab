@@ -230,6 +230,8 @@ async def lifespan(_app: FastAPI):
     _load_gpu_llm_or_disable_gpu_profiles()
     _load_bidradar_pool()
     _backfill_bidradar_counters_if_missing()
+    _bidradar_jobs.update(_load_bidradar_jobs_and_mark_interrupted())
+    _save_bidradar_jobs()  # 위에서 "중단됨"으로 바꾼 job이 있으면 그 표시를 파일에도 즉시 반영
     _load_edu_rag_or_disable()
     _ensure_deck_pdf()
     _init_control_room()
@@ -2011,6 +2013,41 @@ _MAX_BIDRADAR_LOG = 2000  # 파일 기반이라 메모리 부담이 적어 인�
 
 _bidradar_jobs: dict[str, dict] = {}
 _MAX_BIDRADAR_JOBS = 100
+_BIDRADAR_JOBS_PATH = _ROOT / "logs" / "bidradar_jobs.json"
+_bidradar_jobs_file_lock = threading.Lock()
+
+
+def _save_bidradar_jobs() -> None:
+    """_bidradar_jobs 전체를 파일에 통째로 쓴다 — BidRadar가 "재배포 시점에 진행
+    중이던 extract-requirements job이 job_not_found로 사라졌다"고 지적한 문제
+    대응(2026-09-20). 최대 100개(_MAX_BIDRADAR_JOBS)라 매번 전체를 다시 써도 부담이
+    크지 않다. chunks_processed 진행률 갱신마다는 안 부르고 상태가 바뀌는 시점
+    (생성·시작·완료)에만 호출한다 — 그 정도면 충분하고, 재시작으로 죽은 job은 아래
+    _load_bidradar_jobs_and_mark_interrupted()가 어차피 "중단됨"으로 확정해버리므로
+    중간 진행률까지 정밀하게 지킬 필요는 없다."""
+    with _bidradar_jobs_file_lock:
+        _BIDRADAR_JOBS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BIDRADAR_JOBS_PATH.write_text(json.dumps(_bidradar_jobs, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_bidradar_jobs_and_mark_interrupted() -> dict:
+    """서버 기동 시 1회 — 재시작 전 job 기록을 복구한다. 다만 실제 연산은 그 워커
+    스레드와 함께 죽었으므로, queued/running 상태로 남아있던 job은 영원히 안 끝날 걸
+    이미 알고 있다 — 그대로 두면 BidRadar가 done/error가 올 때까지 무한정 폴링하게
+    되니, 여기서 바로 "중단됨" 에러로 확정해 명확한 신호를 준다(job_not_found로 조용히
+    사라지는 것보다 훨씬 낫다)."""
+    if not _BIDRADAR_JOBS_PATH.exists():
+        return {}
+    jobs = json.loads(_BIDRADAR_JOBS_PATH.read_text(encoding="utf-8"))
+    interrupted = 0
+    for job in jobs.values():
+        if job.get("status") in ("queued", "running"):
+            job["status"] = "error"
+            job["error"] = {"code": "interrupted", "message": "서버 재시작으로 처리가 중단됐습니다 — 다시 요청해주세요"}
+            interrupted += 1
+    if interrupted:
+        print(f"[startup] BidRadar job {interrupted}건이 재시작 전 진행 중이었음 — '중단됨'으로 표시")
+    return jobs
 
 
 _BIDRADAR_COUNTERS_PATH = _ROOT / "logs" / "bidradar_counters.json"
@@ -2418,6 +2455,8 @@ def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
         latency_ms = round((time.perf_counter() - start) * 1000)
         job.update({"status": "error", "error": {"code": "inference_failed", "message": str(exc)}, "latency_ms": latency_ms})
         _log_bidradar_call("extract-requirements", job["trace_id"], False, latency_ms=latency_ms, error_code="inference_failed")
+    finally:
+        _save_bidradar_jobs()
 
 
 @app.post("/v1/extract-requirements")
@@ -2448,9 +2487,11 @@ async def bidradar_extract_requirements(request: Request):
     if len(_bidradar_jobs) > _MAX_BIDRADAR_JOBS:
         oldest = min(_bidradar_jobs, key=lambda k: _bidradar_jobs[k]["created_at"])
         del _bidradar_jobs[oldest]
+    _save_bidradar_jobs()
 
     def _start():
         _bidradar_jobs[job_id]["status"] = "running"
+        _save_bidradar_jobs()
         _bidradar_extract_job_worker(job_id, input_text)
 
     loop = asyncio.get_event_loop()
