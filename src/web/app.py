@@ -108,26 +108,31 @@ def _load_gpu_llm_or_disable_gpu_profiles() -> None:
             del EDGE_PROFILES[key]
 
 
-_BIDRADAR_POOL_GPU_INDICES = [2, 3]
+_BIDRADAR_POOL_GPU_INDICES = [2, 2, 3, 3]
 # 이 서버 GPU 4장 중 0번은 기존 공유 GPU 인스턴스(_state["llm_gpu"], 통합관제·엣지
 # 에뮬레이션이 씀), 1번은 파인튜닝 전용(train/finetune_lora.py의 CUDA_VISIBLE_DEVICES=1)
 # — 이 둘과 안 겹치는 2·3번만 BidRadar 전용 풀에 쓴다. BidRadar 문의(2026-09-20,
 # classify-topic 순차 처리 병목) 계기로 도입 — 다른 기능은 손대지 않고 BidRadar
 # 3개 엔드포인트(classify-doc·classify-topic·extract-requirements)만 여기로 옮긴다.
+#
+# 한 GPU에 인스턴스 하나씩만 뒀던 최초 버전은 풀 크기가 2로 묶였는데(GPU 개수만큼만
+# 병렬), 양자화된 모델이 GPU 메모리를 2~3GB 정도만 써서(RTX 4000 Ada 20GB 대비 여유
+# 큼) 같은 GPU에 여러 인스턴스를 얹어도 된다 — 그래서 2·3번 GPU에 각 2개씩, 총 4개로
+# 늘렸다(2026-09-20, "GPU 2·3만으로 여러 개 처리" 요청). GPU 0·1은 여전히 안 건드림.
 _bidradar_pool_locks: list[threading.Lock] = []
 _bidradar_pool_next = 0
 _bidradar_pool_next_lock = threading.Lock()
 
 
 def _load_bidradar_pool() -> None:
-    """GPU 2·3에 각각 독립된 모델 인스턴스를 올려 BidRadar 요청을 실제로 동시에(최대
-    풀 크기만큼) 처리할 수 있게 한다. split_mode=NONE + main_gpu로 명시적으로 고정해야
-    한다 — 기본값(LAYER 분산)으로 두면 작은 모델도 보이는 GPU 전부에 레이어를 흩어
-    올려서(fuser -v /dev/nvidia*로 실제 확인, 기존 llm_gpu 인스턴스가 GPU 0~3을 전부
-    쥐고 있었음) 새로 올리는 풀이 기존 인스턴스·파인튜닝과 자원을 나눠 쓰게 된다.
-    GPU 로드가 실패해도(예: CUDA 미지원 빌드) 서버 기동 자체는 막지 않고, 그 GPU는
-    풀에서 빼고 남은 것만 쓴다 — 전부 실패하면 _run_bidradar_llm()이 기존 공유 CPU
-    인스턴스로 조용히 폴백한다."""
+    """GPU 2·3에 인스턴스를 여러 개씩 올려(_BIDRADAR_POOL_GPU_INDICES) BidRadar 요청을
+    실제로 동시에(최대 풀 크기만큼) 처리할 수 있게 한다. split_mode=NONE + main_gpu로
+    명시적으로 고정해야 한다 — 기본값(LAYER 분산)으로 두면 작은 모델도 보이는 GPU
+    전부에 레이어를 흩어 올려서(fuser -v /dev/nvidia*로 실제 확인, 기존 llm_gpu
+    인스턴스가 GPU 0~3을 전부 쥐고 있었음) 새로 올리는 풀이 기존 인스턴스·파인튜닝과
+    자원을 나눠 쓰게 된다. GPU 로드가 실패해도(예: CUDA 미지원 빌드) 서버 기동 자체는
+    막지 않고, 그 자리만 빼고 남은 것만 쓴다 — 전부 실패하면 _run_bidradar_llm()이
+    기존 공유 CPU 인스턴스로 조용히 폴백한다."""
     global _bidradar_pool_locks
     pool = []
     for idx in _BIDRADAR_POOL_GPU_INDICES:
@@ -148,7 +153,7 @@ def _run_bidradar_llm(fn):
     """fn(llm)을 BidRadar 전용 풀에서 실행한다. 실행 스레드(run_in_executor) 안에서
     호출해야 한다 — 락 획득이 블로킹이라 이벤트 루프에서 직접 부르면 안 됨(기존
     _llm_lock 사용 패턴과 동일). 유휴 워커가 있으면 즉시 쓰고, 전부 바쁘면 라운드로빈
-    으로 하나를 골라 그 자리에서 줄을 선다 — 풀 크기(2)를 넘는 동시 요청은 자연히
+    으로 하나를 골라 그 자리에서 줄을 선다 — 풀 크기를 넘는 동시 요청은 자연히
     대기하지만, 순차 하나였을 때보다는 항상 빠르거나 같다. 풀이 비어있으면(로드 실패)
     기존 공유 CPU 인스턴스로 폴백 — 병렬은 못 해도 BidRadar 요청 자체는 계속 처리."""
     global _bidradar_pool_next
