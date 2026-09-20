@@ -163,6 +163,11 @@ const AUTO_INTERVAL_MS = 2500;
 let tickIndex = -1;
 let approved = false;
 const logRows = [];
+// "처음부터"를 누를 때마다 1씩 증가 — 그 이전에 시작된 비동기 호출(LLM 응답 대기 중)이
+// 나중에 돌아와도 이 값이 바뀌었으면 자기 결과를 화면에 반영하지 않고 조용히 버린다.
+// 그렇게 안 하면 리셋/재시작을 빠르게 여러 번 눌렀을 때 늦게 도착한 옛 응답이 방금
+// 시작한 새 시나리오의 화면을 덮어써버린다(2026-09-20 사용자 실측 버그).
+let scenarioGen = 0;
 
 function isAbnormal(tick) { return !!tick && tick.DO_평균_pct < SOP_DO_MIN; }
 
@@ -316,7 +321,7 @@ document.getElementById('history-modal').addEventListener('click', e => {
   if (e.target.id === 'history-modal') closeHistoryModal();
 });
 
-async function triggerAgentRecommendation(tick, hoursIgnored) {
+async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
   const label = hoursIgnored > 0 ? `⚠ 미조치 ${hoursIgnored}시간째 재판단` : '최초 이상 감지 → 판단';
   const profileEl = document.getElementById('edge-profile-select');
   const profileLabel = profileEl ? profileEl.selectedOptions[0].textContent : '';
@@ -342,6 +347,9 @@ async function triggerAgentRecommendation(tick, hoursIgnored) {
     entry.loading = false;
     entry.error = true;
   }
+  // 응답을 기다리는 사이 "처음부터"가 눌려 다른 시나리오가 시작됐으면, 이 늦게 도착한
+  // 결과는 화면에 반영하지 않는다(scenarioGen 방식 — 위 선언부 주석 참고).
+  if (myGen !== scenarioGen) return;
   renderStage4();
 }
 
@@ -363,6 +371,7 @@ let advancing = false;
 
 async function advanceTick() {
   if (advancing || approved || tickIndex >= ALL_TICKS.length - 1) { stopAuto(); return; }
+  const myGen = scenarioGen;
   advancing = true;
   try {
     tickIndex++;
@@ -374,7 +383,9 @@ async function advanceTick() {
     renderStage3(tick, tickIndex);
     if (isAbnormal(tick)) {
       const hoursIgnored = isEscalation ? tickIndex - (TICKS.length - 1) : 0;
-      await triggerAgentRecommendation(tick, hoursIgnored);
+      await triggerAgentRecommendation(tick, hoursIgnored, myGen);
+      // 응답을 기다리는 사이 리셋됐으면 여기서부터는 전부 옛 시나리오 얘기다 — 중단.
+      if (myGen !== scenarioGen) return;
       // 이상 판단이 나온 시점엔 자동 진행을 멈춰 운영자가 승인/방치를 직접 고르게 한다.
       // 안 멈추면 다음 자동 틱이 곧바로 새 판단을 또 시작해 승인 버튼이 결과가 뜨자마자
       // 다시 비활성화되는 것처럼 보인다(2026-09-20 실측 버그).
@@ -388,25 +399,31 @@ async function advanceTick() {
       document.getElementById('advance-btn').disabled = true;
     }
   } finally {
-    advancing = false;
+    // 그 사이 리셋됐다면(scenarioGen이 바뀌었다면) advancing은 이미 resetScenario가
+    // 새 세대를 위해 false로 되돌려놨다 — 여기서 다시 건드리면 그 사이 시작된 새
+    // advanceTick 호출의 진행 중 플래그를 덮어써버릴 수 있어 손대지 않는다.
+    if (myGen === scenarioGen) advancing = false;
   }
 }
 
 let autoRunning = false;
 
-async function runAutoLoop() {
-  while (autoRunning && !approved && tickIndex < ALL_TICKS.length - 1) {
+// myGen을 같이 들고 있는 이유: "자동 진행 시작 → 처음부터 → 자동 진행 시작"을 빠르게
+// 누르면, 리셋 전에 시작된 옛 루프가 sleep에서 깨어났을 때 autoRunning이 이미 새
+// 루프에 의해 다시 true가 돼 있을 수 있다 — 세대가 다르면 옛 루프는 그냥 멈춘다.
+async function runAutoLoop(myGen) {
+  while (autoRunning && myGen === scenarioGen && !approved && tickIndex < ALL_TICKS.length - 1) {
     await advanceTick();
-    if (autoRunning && !approved) await new Promise(r => setTimeout(r, AUTO_INTERVAL_MS));
+    if (autoRunning && myGen === scenarioGen && !approved) await new Promise(r => setTimeout(r, AUTO_INTERVAL_MS));
   }
-  stopAuto();
+  if (myGen === scenarioGen) stopAuto();
 }
 
 function startAuto() {
   if (autoRunning || approved) return;
   autoRunning = true;
   document.getElementById('auto-toggle').textContent = '자동 진행 정지 ⏸';
-  runAutoLoop();
+  runAutoLoop(scenarioGen);
 }
 
 function stopAuto() {
@@ -420,6 +437,8 @@ function toggleAuto() {
 }
 
 function resetScenario() {
+  scenarioGen++; // 지금까지의 진행 중인 비동기 호출을 전부 "옛 시나리오"로 무효화
+  advancing = false; // 위 무효화로 그 호출들의 finally가 더 이상 이걸 안 풀어줄 수 있으니 여기서 강제로 연다
   stopAuto();
   closeHistoryModal();
   tickIndex = -1;
