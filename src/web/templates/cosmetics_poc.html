@@ -48,9 +48,10 @@
 
 <div class="card">
   <strong>시나리오 데모 — 발효 공정 DO 이상 감지 → 조치</strong>
-  <div class="why">왼쪽부터 장비(Layer 1) → 시계열 데이터(Layer 2) → AI 분석 4종(Layer 3) → AI Agent(Layer 4, sLLM)로 데이터가 흐릅니다. "다음 시점 진행"을 누르면 미리 준비된 시나리오(로트 FMT-20260830-02 재작업 사례)를 한 시점씩 재생합니다. SOP 기준을 벗어나면 Agent가 자동으로 SOP를 근거로 판단해 권고하고, 운영자가 승인하면 그 결과가 Layer 1 장비 상태에 반영됩니다.</div>
+  <div class="why">왼쪽부터 장비(Layer 1) → 시계열 데이터(Layer 2) → AI 분석 4종(Layer 3) → AI Agent(Layer 4, sLLM)로 데이터가 흐릅니다. 미리 준비된 시나리오(로트 FMT-20260830-02 재작업 사례)를 한 시점씩(또는 "자동 진행"으로 계속) 재생합니다. SOP 기준을 벗어나면 Agent가 자동으로 SOP를 근거로 판단해 권고하고, 운영자가 승인하면 그 결과가 Layer 1 장비 상태에 반영됩니다. <strong>승인하지 않고 방치하면 상태가 계속 악화</strong>되는 것도 함께 보여줍니다(최대 5시간 경과 시점까지).</div>
   <div class="scenario-controls">
     <button id="advance-btn">다음 시점 진행 ▶</button>
+    <button id="auto-toggle">자동 진행 시작 ▶▶</button>
     <button id="reset-btn">처음부터</button>
   </div>
 
@@ -105,11 +106,23 @@ const TICKS = [
   { t: 'D+2 08:00', 발효온도_C: 30.0, pH_최종: 4.5, DO_평균_pct: 24, 교반RPM: 118 },
   { t: 'D+3 08:00', 발효온도_C: 29.8, pH_최종: 4.3, DO_평균_pct: 18, 교반RPM: 115 },
 ];
+// 이상 감지 후에도 운영자가 승인을 누르지 않으면 계속 나빠지는 걸 보여주기 위한 연장 시점들.
+// 무한히 나빠지진 않게 여기서 멈추고(5틱) "위험 지속" 상태로 고정된다.
+const ESCALATION = [
+  { t: 'D+3 09:00 (미조치 1시간)', 발효온도_C: 29.6, pH_최종: 4.2, DO_평균_pct: 15, 교반RPM: 112 },
+  { t: 'D+3 10:00 (미조치 2시간)', 발효온도_C: 29.4, pH_최종: 4.1, DO_평균_pct: 12, 교반RPM: 110 },
+  { t: 'D+3 11:00 (미조치 3시간)', 발효온도_C: 29.2, pH_최종: 4.0, DO_평균_pct: 9, 교반RPM: 108 },
+  { t: 'D+3 12:00 (미조치 4시간)', 발효온도_C: 29.0, pH_최종: 3.9, DO_평균_pct: 7, 교반RPM: 105 },
+  { t: 'D+3 13:00 (미조치 5시간)', 발효온도_C: 28.8, pH_최종: 3.8, DO_평균_pct: 5, 교반RPM: 103 },
+];
+const ALL_TICKS = TICKS.concat(ESCALATION);
 const RECOVERY = { t: 'D+3 14:00 (조치 후)', 발효온도_C: 29.9, pH_최종: 4.3, DO_평균_pct: 26, 교반RPM: 140 };
+const AUTO_INTERVAL_MS = 2500;
 
 let tickIndex = -1;
 let approved = false;
 let autoTriggered = false;
+let autoTimer = null;
 const logRows = [];
 
 function isAbnormal(tick) { return !!tick && tick.DO_평균_pct < SOP_DO_MIN; }
@@ -202,20 +215,34 @@ async function triggerAgentRecommendation() {
     stage4.innerHTML = `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div>` +
       renderStepsCompact(data.steps || []) +
       `<div class="answer-card" style="margin-top:8px; padding:10px 12px;"><div style="white-space:pre-wrap; font-size:0.86rem;">${escapeHtml(data.narrative || '(응답 없음)')}</div></div>` +
-      `<button id="approve-btn" style="margin-top:10px; width:100%;">운영자 조치 승인 → 교반 RPM 상향</button>`;
+      `<button id="approve-btn" style="margin-top:10px; width:100%;">운영자 조치 승인 → 교반 RPM 상향</button>` +
+      `<div id="escalation-note" class="stat" style="color:var(--danger); margin-top:8px;"></div>`;
     document.getElementById('approve-btn').addEventListener('click', approveAction);
   } catch (e) {
     renderStage4Idle('요청 실패 — 다시 시도해주세요.');
   }
 }
 
+function updateEscalationNote(hoursIgnored) {
+  const el = document.getElementById('escalation-note');
+  if (!el) return;
+  if (hoursIgnored >= ESCALATION.length) {
+    el.textContent = `⚠ 미조치 ${hoursIgnored}시간째 — 더 악화되지 않도록 시나리오를 여기서 고정했습니다. 승인 전까지는 위험 상태가 계속됩니다.`;
+  } else {
+    el.textContent = `⚠ 미조치 ${hoursIgnored}시간째 — 상태가 계속 악화되고 있습니다.`;
+  }
+}
+
 function approveAction() {
   approved = true;
+  stopAuto();
   pushLog(RECOVERY, '운영자 승인 → 교반 RPM 140으로 상향, DO 회복 확인');
   renderStage1(RECOVERY);
   renderStage2();
   renderStage3(RECOVERY, 99);
   const stage4 = document.getElementById('stage-4');
+  const note = document.getElementById('escalation-note');
+  if (note) note.textContent = '';
   stage4.insertAdjacentHTML('beforeend', `<div class="stat" style="margin-top:8px; color:var(--rule);">✅ 조치 완료 — Layer 1 장비 상태에 반영되었습니다.</div>`);
   const approveBtn = document.getElementById('approve-btn');
   approveBtn.disabled = true;
@@ -226,25 +253,48 @@ function approveAction() {
 }
 
 function advanceTick() {
-  if (approved || tickIndex >= TICKS.length - 1) return;
+  if (approved || tickIndex >= ALL_TICKS.length - 1) { stopAuto(); return; }
   tickIndex++;
-  const tick = TICKS[tickIndex];
-  pushLog(tick);
+  const tick = ALL_TICKS[tickIndex];
+  const isEscalation = tickIndex >= TICKS.length;
+  pushLog(tick, isEscalation ? '미조치 지속 중 — 상태 악화' : null);
   renderStage1(tick);
   renderStage2();
   renderStage3(tick, tickIndex);
   if (isAbnormal(tick)) {
-    if (!autoTriggered) triggerAgentRecommendation();
+    if (!autoTriggered) {
+      triggerAgentRecommendation();
+    } else if (isEscalation) {
+      updateEscalationNote(tickIndex - (TICKS.length - 1));
+    }
   } else {
     renderStage4Idle('이상 없음 — 대기 중');
   }
-  if (tickIndex >= TICKS.length - 1) {
-    document.getElementById('advance-btn').textContent = '마지막 시점';
+  if (tickIndex >= ALL_TICKS.length - 1) {
+    stopAuto();
+    document.getElementById('advance-btn').textContent = '더 진행할 시점 없음 (승인 대기)';
     document.getElementById('advance-btn').disabled = true;
   }
 }
 
+function startAuto() {
+  if (autoTimer || approved) return;
+  autoTimer = setInterval(advanceTick, AUTO_INTERVAL_MS);
+  document.getElementById('auto-toggle').textContent = '자동 진행 정지 ⏸';
+}
+
+function stopAuto() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  const btn = document.getElementById('auto-toggle');
+  if (btn) btn.textContent = '자동 진행 시작 ▶▶';
+}
+
+function toggleAuto() {
+  if (autoTimer) stopAuto(); else startAuto();
+}
+
 function resetScenario() {
+  stopAuto();
   tickIndex = -1;
   approved = false;
   autoTriggered = false;
@@ -258,6 +308,7 @@ function resetScenario() {
 }
 
 document.getElementById('advance-btn').addEventListener('click', advanceTick);
+document.getElementById('auto-toggle').addEventListener('click', toggleAuto);
 document.getElementById('reset-btn').addEventListener('click', resetScenario);
 resetScenario();
 
