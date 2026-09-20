@@ -493,9 +493,14 @@ def quality(request: Request):
 # ────────────────────────────────────────────────────────────────
 @app.get("/cosmetics-poc", response_class=HTMLResponse)
 def cosmetics_poc_page(request: Request):
+    # 통합관제의 기본값(4c8g, 코어 제한 있는 에뮬레이션)과 다르게 "서버 기본(GPU)"을
+    # 기본 선택지로 둔다(사용자 요청, 2026-09-20) — 이 페이지는 시연 중 반응성이
+    # 중요해서, 느린 에뮬레이션은 사용자가 명시적으로 고를 때만 켜지길 원함. GPU
+    # 로드가 실패해 "server_gpu"가 EDGE_PROFILES에서 지워졌으면 그냥 목록 첫 항목이
+    # 자동 선택된다(템플릿의 selected 매칭이 안 되므로 — 별도 처리 불필요).
     return templates.TemplateResponse(
         request, "cosmetics_poc.html",
-        {"edge_profiles": EDGE_PROFILES, "default_edge_profile": _DEFAULT_EDGE_PROFILE},
+        {"edge_profiles": EDGE_PROFILES, "default_edge_profile": "server_gpu"},
     )
 
 
