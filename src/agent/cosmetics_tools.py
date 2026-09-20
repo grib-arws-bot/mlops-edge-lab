@@ -113,14 +113,20 @@ def query_lot(lot_id: str | None = None, process: str | None = None, 판정: str
     """Layer 2(RDB) 조회 도구 — REST 계약은 GET /api/cosmetics/lots와 동일하다(app.py
     라우트가 이 함수를 그대로 감싼다). lot_id를 주면 단건, 아니면 process/판정으로 필터링한
     목록을 반환한다. 각 필드에 Layer 1 장비 출처(EQUIPMENT_MAP)를 같이 실어서, 프론트가
-    "이 값이 어느 센서에서 왔는지"를 보여줄 수 있게 한다."""
+    "이 값이 어느 센서에서 왔는지"를 보여줄 수 있게 한다.
+
+    **2026-09-20 실측으로 발견**: LLM이 lot_id를 정확히 넘기면서도 process/판정을 추측해서
+    같이 넘기는 경우가 실제로 있었다(예: "EXT-..." 로트인데 process="초고압 나노분산"으로
+    잘못 추측) — 세 필터를 AND로 묶으면 lot_id는 맞았는데도 0건이 나온다. lot_id는 그
+    자체로 고유키이므로, lot_id가 있으면 다른 필터는 무시한다."""
     lots = _load_lots()
     if lot_id:
         lots = [l for l in lots if l["lot_id"] == lot_id]
-    if process:
-        lots = [l for l in lots if l["process"] == process]
-    if 판정:
-        lots = [l for l in lots if l["판정"] == 판정]
+    else:
+        if process:
+            lots = [l for l in lots if l["process"] == process]
+        if 판정:
+            lots = [l for l in lots if l["판정"] == 판정]
 
     equipment_trace = []
     for lot in lots:
