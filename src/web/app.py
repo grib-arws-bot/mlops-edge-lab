@@ -493,7 +493,10 @@ def quality(request: Request):
 # ────────────────────────────────────────────────────────────────
 @app.get("/cosmetics-poc", response_class=HTMLResponse)
 def cosmetics_poc_page(request: Request):
-    return templates.TemplateResponse(request, "cosmetics_poc.html", {})
+    return templates.TemplateResponse(
+        request, "cosmetics_poc.html",
+        {"edge_profiles": EDGE_PROFILES, "default_edge_profile": _DEFAULT_EDGE_PROFILE},
+    )
 
 
 @app.get("/api/cosmetics/lots")
@@ -517,23 +520,48 @@ async def cosmetics_predict(request: Request):
 @app.post("/api/cosmetics/ask")
 async def cosmetics_ask(request: Request):
     """Layer 4(AI 에이전트) — 자연어 질문을 받아 도구 호출 루프를 실행하고, Layer 1~4
-    파이프라인 시각화에 쓸 단계별 트레이스와 최종 답변을 반환한다."""
+    파이프라인 시각화에 쓸 단계별 트레이스와 최종 답변을 반환한다.
+
+    edge_profile을 받으면(사용자 요청, 2026-09-20) 산업안전 통합관제와 동일한 방법으로
+    처리 환경을 나눈다 — 서버 기본이면 이미 로드된 인프로세스 모델을(_llm_lock으로
+    직렬화), 코어 제한이 있는 프로파일이면 cgroup 에뮬레이션(_run_cosmetics_emulated)을
+    쓴다. "GPU 있는 4코어 엣지 디바이스라면?" 같은 질문에 실제로 그 조건에서 돌려본
+    숫자로 답하기 위함 — 가짜로 숫자만 줄이는 게 아니다."""
     payload = await request.json()
     question = (payload.get("question") or "").strip()
     if not question:
         return JSONResponse({"error": "질문을 입력하세요"}, status_code=400)
 
+    # 기본값은 "서버 기본"(인프로세스, 제한 없음) — 통합관제와 달리 이 엔드포인트는
+    # 기존에 이미 빠른 인프로세스 호출로 쓰이고 있었으므로(Layer 4 자유 질의), 프런트가
+    # edge_profile을 안 보내는 기존 호출은 그대로 빠르게 동작해야 한다. 느린 에뮬레이션은
+    # 시나리오 화면에서 사용자가 명시적으로 프로파일을 고를 때만 켜진다.
+    profile_key = payload.get("edge_profile", "server")
+    profile = EDGE_PROFILES.get(profile_key, EDGE_PROFILES["server"])
+
     loop = asyncio.get_event_loop()
 
     def _run():
-        with _llm_lock:
-            return run_cosmetics_agent(question, _state["cosmetics_ctx"], _state["llm"])
+        global _gpu_llm_busy
+        if profile["cores"] is None:
+            llm, lock = _pick_inprocess_llm(profile)
+            is_gpu = lock is _llm_gpu_lock
+            with lock:
+                if is_gpu:
+                    _gpu_llm_busy = True
+                try:
+                    return run_cosmetics_agent(question, _state["cosmetics_ctx"], llm)
+                finally:
+                    if is_gpu:
+                        _gpu_llm_busy = False
+        return _run_cosmetics_emulated(question, profile["cores"], profile["mem_gb"], profile.get("gpu", False))
 
     try:
         result = await loop.run_in_executor(None, _run)
     except Exception as exc:  # noqa: BLE001 — 조용한 실패 금지
         return JSONResponse({"error": str(exc)}, status_code=502)
 
+    result["edge_label"] = profile["label"]
     return JSONResponse(result)
 
 
@@ -717,6 +745,45 @@ def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool,
             # 타임아웃으로 번짐. 스코프 이름을 알고 있으니 명시적으로 정지시킨다.
             subprocess.run(["systemctl", "--user", "stop", scope_unit], capture_output=True)
             raise RuntimeError(f"엣지 에뮬레이션 타임아웃(180초 초과) — 좀비 프로세스는 정리했습니다")
+
+        if proc.returncode != 0 or not output_path.exists():
+            raise RuntimeError(f"엣지 에뮬레이션 실행 실패(exit {proc.returncode}): {proc.stderr[-1500:]}")
+        return json.loads(output_path.read_text(encoding="utf-8"))
+
+
+def _run_cosmetics_emulated(question: str, cores: int, mem_gb: int, gpu: bool) -> dict:
+    """화장품 PoC Layer 4 — 질문 하나를 _run_events_emulated와 동일한 방법(systemd-run
+    cgroup + taskset)으로 에뮬레이션된 엣지 스펙에서 실행한다(agent/cosmetics_run_cli.py).
+    산업안전 쪽은 센서 이벤트 리스트를 주고받지만 이쪽은 질문 문자열 하나만 주고받는
+    차이만 빼면 로직이 동일하다."""
+    python_bin = _ROOT / ".venv" / "bin" / "python"
+    scope_unit = f"mlops-edge-emu-{uuid.uuid4().hex[:8]}.scope"
+    core_list = ",".join(str(i) for i in range(cores))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "input.json"
+        output_path = Path(tmp) / "output.json"
+        input_path.write_text(json.dumps({"question": question}, ensure_ascii=False), encoding="utf-8")
+
+        cmd = [
+            "systemd-run", "--user", "--scope", "--quiet", f"--unit={scope_unit}",
+            "-p", f"CPUQuota={cores * 100}%",
+            "-p", f"MemoryMax={mem_gb}G",
+            "-p", "MemorySwapMax=0",
+            "--", "taskset", "-c", core_list,
+            str(python_bin), "-m", "agent.cosmetics_run_cli", str(input_path), str(output_path),
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, cwd=str(_ROOT), timeout=180, capture_output=True, text=True,
+                env={
+                    **os.environ, "PYTHONPATH": str(_ROOT / "src"),
+                    "AGENT_THREADS": str(cores), "AGENT_GPU": "1" if gpu else "0",
+                },
+            )
+        except subprocess.TimeoutExpired:
+            subprocess.run(["systemctl", "--user", "stop", scope_unit], capture_output=True)
+            raise RuntimeError("엣지 에뮬레이션 타임아웃(180초 초과) — 좀비 프로세스는 정리했습니다")
 
         if proc.returncode != 0 or not output_path.exists():
             raise RuntimeError(f"엣지 에뮬레이션 실행 실패(exit {proc.returncode}): {proc.stderr[-1500:]}")

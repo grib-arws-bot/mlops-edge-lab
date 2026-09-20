@@ -38,6 +38,9 @@
   #reset-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); }
   #reset-btn:hover { border-color: var(--accent); color: var(--accent); }
   #history-btn { margin-top: 6px; }
+  .edge-profile-row { margin: 8px 0 10px; }
+  .edge-profile-row label { display: block; font-size: 0.7rem; color: var(--muted); margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .edge-profile-row select { padding: 6px 8px; font-size: 0.8rem; }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
   .modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; width: min(720px, 100%); max-height: 80vh; display: flex; flex-direction: column; }
@@ -76,7 +79,18 @@
     <div class="arrow">→</div>
     <div class="stage-box" id="stage-3"></div>
     <div class="arrow">→</div>
-    <div class="stage-box" id="stage-4"></div>
+    <div class="stage-box" id="stage-4">
+      <div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div>
+      <div class="edge-profile-row">
+        <label for="edge-profile-select">엣지 사양(에뮬레이션) — 이 조건에서 실제로 돌려봄</label>
+        <select id="edge-profile-select">
+          {% for key, p in edge_profiles.items() %}
+          <option value="{{ key }}" {% if key == default_edge_profile %}selected{% endif %}>{{ p.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div id="stage-4-body"><div class="stat">대기 중</div></div>
+    </div>
   </div>
 </div>
 
@@ -213,8 +227,12 @@ function renderStage3(tick, idxForTrend) {
 }
 
 function renderStage4Idle(msg) {
-  document.getElementById('stage-4').innerHTML =
-    `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div><div class="stat">${escapeHtml(msg)}</div>`;
+  document.getElementById('stage-4-body').innerHTML = `<div class="stat">${escapeHtml(msg)}</div>`;
+}
+
+function selectedEdgeProfile() {
+  const el = document.getElementById('edge-profile-select');
+  return el ? el.value : 'server';
 }
 
 function renderStepsCompact(steps) {
@@ -231,19 +249,21 @@ function renderStepsCompact(steps) {
 const agentHistory = []; // {label, loading, error, steps, narrative} — 최신이 배열 앞쪽
 
 function renderEntryDetail(h) {
-  if (h.loading) return `<div class="stat" style="margin-top:4px;">Agent가 SOP 기준으로 판단하는 중...</div>`;
+  if (h.loading) return `<div class="stat" style="margin-top:4px;">Agent가 SOP 기준으로 판단하는 중... (${escapeHtml(h.profileLabel || '')})</div>`;
   if (h.error) return `<div class="stat" style="margin-top:4px;">요청 실패</div>`;
   const stepsHtml = h.synthetic ? '' : renderStepsCompact(h.steps);
+  const edgeNote = h.edgeLabel ? `<div class="stat" style="margin-top:6px; color:var(--muted);">처리 환경: ${escapeHtml(h.edgeLabel)} · ${h.elapsed != null ? h.elapsed.toFixed(1) + '초' : ''}</div>` : '';
   return `${stepsHtml}
-    <div class="answer-card" style="margin-top:6px; padding:8px 10px;"><div style="white-space:pre-wrap; font-size:0.84rem;">${escapeHtml(h.narrative)}</div></div>`;
+    <div class="answer-card" style="margin-top:6px; padding:8px 10px;"><div style="white-space:pre-wrap; font-size:0.84rem;">${escapeHtml(h.narrative)}</div></div>
+    ${edgeNote}`;
 }
 
 // Layer 4 칸에는 최신 판단 1건만 보여준다 — 이상감지마다 다시 호출하다 보니 카드가
 // 아래로 계속 늘어나 보기 어려워서(사용자 지적), 이전 판단은 모달 팝업으로 뺐다.
 function renderStage4() {
-  const el = document.getElementById('stage-4');
+  const bodyEl = document.getElementById('stage-4-body');
   if (!agentHistory.length) {
-    el.innerHTML = `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div><div class="stat">대기 중</div>`;
+    bodyEl.innerHTML = `<div class="stat">대기 중</div>`;
     return;
   }
   const latest = agentHistory[0];
@@ -257,7 +277,7 @@ function renderStage4() {
   const historyHtml = agentHistory.length > 1
     ? `<button id="history-btn" style="width:100%; background:transparent; border:1px solid var(--border); color:var(--muted);">이전 판단 이력 보기 (${agentHistory.length}건)</button>`
     : '';
-  el.innerHTML = `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div>${latestHtml}${approveHtml}${historyHtml}`;
+  bodyEl.innerHTML = `${latestHtml}${approveHtml}${historyHtml}`;
   if (approveHtml) document.getElementById('approve-btn').addEventListener('click', approveAction);
   if (historyHtml) document.getElementById('history-btn').addEventListener('click', openHistoryModal);
 }
@@ -298,20 +318,26 @@ document.getElementById('history-modal').addEventListener('click', e => {
 
 async function triggerAgentRecommendation(tick, hoursIgnored) {
   const label = hoursIgnored > 0 ? `⚠ 미조치 ${hoursIgnored}시간째 재판단` : '최초 이상 감지 → 판단';
-  const entry = { label, loading: true };
+  const profileEl = document.getElementById('edge-profile-select');
+  const profileLabel = profileEl ? profileEl.selectedOptions[0].textContent : '';
+  const entry = { label, loading: true, profileLabel };
   agentHistory.unshift(entry);
   renderStage4();
   const question = hoursIgnored > 0
     ? `지금 진행 중인 발효 탱크(로트 FMT-20260920-01)의 DO가 ${tick.DO_평균_pct}%까지 떨어졌습니다(이상 감지 후 ${hoursIgnored}시간 경과, 아직 조치되지 않음). SOP 최소 기준(${SOP_DO_MIN}%) 미만인데, 지금 이 배치를 재작업으로 판정해서 종료해도 될까요?`
     : `지금 진행 중인 발효 탱크(로트 FMT-20260920-01)의 DO가 ${tick.DO_평균_pct}%로 떨어졌습니다. SOP 최소 기준(${SOP_DO_MIN}%) 미만인데, 지금 이 배치를 재작업으로 판정해서 종료해도 될까요?`;
+  const startedAt = performance.now();
   try {
     const res = await fetch('/api/cosmetics/ask', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, edge_profile: selectedEdgeProfile() }),
     });
     const data = await res.json();
     entry.loading = false;
     entry.steps = data.steps || [];
     entry.narrative = data.narrative || '(응답 없음)';
+    entry.edgeLabel = data.edge_label;
+    entry.elapsed = (performance.now() - startedAt) / 1000;
   } catch (e) {
     entry.loading = false;
     entry.error = true;
