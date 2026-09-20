@@ -229,6 +229,7 @@ async def lifespan(_app: FastAPI):
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
     _load_gpu_llm_or_disable_gpu_profiles()
     _load_bidradar_pool()
+    _backfill_bidradar_counters_if_missing()
     _load_edu_rag_or_disable()
     _ensure_deck_pdf()
     _init_control_room()
@@ -1336,35 +1337,43 @@ def bidradar_stats():
     받은 요청만 반영한다(사용자 요청, 2026-09-20). 파일에서 매번 다시 읽는다
     (2026-09-20 정정 — 원래 인메모리 리스트였는데, 배포로 서비스가 재시작될
     때마다 지워져서 실제로 BidRadar가 접속했던 기록이 1시간 만에 사라진 걸
-    사용자가 직접 겪고 지적함. 재시작해도 남아야 한다는 요구로 파일 기반 전환)."""
+    사용자가 직접 겪고 지적함. 재시작해도 남아야 한다는 요구로 파일 기반 전환).
+
+    **총 건수 등 누적 숫자는 상세 로그가 아니라 _load_bidradar_counters()에서 온다**
+    — "2000건까지만 세지는데 숫자는 정확해야 한다"는 지적(2026-09-20) 이후 분리함.
+    상세 로그(call_log)는 "최근 호출 기록"·일별 추이 그래프에만 쓴다 — 이건 최근
+    수천 건 범위여도 실용상 문제없다(사용자도 "로그는 제한을 둬도 된다"고 확인)."""
     call_log = _load_bidradar_call_log()
+    counters = _load_bidradar_counters()
     per_endpoint = {}
     for ep in _BIDRADAR_ENDPOINT_ORDER:
-        calls = [c for c in call_log if c["endpoint"] == ep]
-        success = [c for c in calls if c["success"]]
+        c = counters.get(ep)
+        if not c or not c["total"]:
+            per_endpoint[ep] = {
+                "total": 0, "success": 0, "failed": 0, "avg_latency_ms": None,
+                "total_tokens_in": 0, "total_tokens_out": 0,
+                "first_call_date": None, "days_tracked": None,
+            }
+            continue
         # 상단 카드에 "언제부터 며칠째 누적"을 같이 보여준다(사용자 요청, 2026-09-20)
         # — 누적 총계만 보면 "오늘 갑자기 이만큼 왔다"인지 "여러 날에 걸쳐 쌓였다"인지
-        # 구분이 안 되기 때문.
-        if calls:
-            first_at = min(c["at"] for c in calls)
-            first_date = first_at[:10]
-            days_tracked = (date.today() - date.fromisoformat(first_date)).days + 1
-        else:
-            first_date, days_tracked = None, None
+        # 구분이 안 되기 때문. first_call_at도 카운터에 있어 로그가 잘려도 안 변한다.
+        first_date = c["first_call_at"][:10]
+        days_tracked = (date.today() - date.fromisoformat(first_date)).days + 1
         per_endpoint[ep] = {
-            "total": len(calls),
-            "success": len(success),
-            "failed": len(calls) - len(success),
-            "avg_latency_ms": round(sum(c["latency_ms"] for c in success) / len(success)) if success else None,
-            "total_tokens_in": sum(c["tokens_in"] for c in calls),
-            "total_tokens_out": sum(c["tokens_out"] for c in calls),
+            "total": c["total"],
+            "success": c["success"],
+            "failed": c["failed"],
+            "avg_latency_ms": round(c["latency_sum_ms"] / c["latency_count"]) if c["latency_count"] else None,
+            "total_tokens_in": c["tokens_in"],
+            "total_tokens_out": c["tokens_out"],
             "first_call_date": first_date,
             "days_tracked": days_tracked,
         }
     return JSONResponse({
         "endpoints": per_endpoint,
         "recent": call_log[:50],
-        "total_calls": len(call_log),
+        "total_calls": sum(c["total"] for c in per_endpoint.values()),
         "daily": _bidradar_daily_stats(call_log),
     })
 
@@ -2004,6 +2013,46 @@ _bidradar_jobs: dict[str, dict] = {}
 _MAX_BIDRADAR_JOBS = 100
 
 
+_BIDRADAR_COUNTERS_PATH = _ROOT / "logs" / "bidradar_counters.json"
+_bidradar_counters_lock = threading.Lock()
+
+
+def _load_bidradar_counters() -> dict:
+    if not _BIDRADAR_COUNTERS_PATH.exists():
+        return {}
+    return json.loads(_BIDRADAR_COUNTERS_PATH.read_text(encoding="utf-8"))
+
+
+def _bump_bidradar_counters(endpoint: str, success: bool, latency_ms: int, tokens_in: int, tokens_out: int, at: str) -> None:
+    """상세 로그(_BIDRADAR_CALL_LOG_PATH)와 별개로, 잘리지 않는 누적 집계를 따로
+    유지한다. "왜 2000건까지만 세지는가 — 숫자는 정확해야 한다, 로그는 제한을 둬도
+    된다"는 지적(2026-09-20)에 따른 것 — 상세 로그는 용량 때문에 최근 N건만 남겨도
+    되지만, 총 건수·성공/실패·평균 지연시간·토큰 합계 같은 누적 숫자는 로그가 잘려도
+    절대 줄어들면 안 된다. 그래서 매 호출마다 파일에 통째로 다시 쓰는 대신 "합계"만
+    가진 작은 JSON 하나를 더해가는 방식으로 관리한다."""
+    with _bidradar_counters_lock:
+        counters = _load_bidradar_counters()
+        c = counters.setdefault(endpoint, {
+            "total": 0, "success": 0, "failed": 0,
+            "latency_sum_ms": 0, "latency_count": 0,
+            "tokens_in": 0, "tokens_out": 0, "first_call_at": at,
+        })
+        c["total"] += 1
+        if success:
+            c["success"] += 1
+            c["latency_sum_ms"] += latency_ms
+            c["latency_count"] += 1
+        else:
+            c["failed"] += 1
+        c["tokens_in"] += tokens_in
+        c["tokens_out"] += tokens_out
+        if not c.get("first_call_at"):
+            c["first_call_at"] = at
+        counters[endpoint] = c
+        _BIDRADAR_COUNTERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BIDRADAR_COUNTERS_PATH.write_text(json.dumps(counters, ensure_ascii=False), encoding="utf-8")
+
+
 def _log_bidradar_call(
     endpoint: str, trace_id: str, success: bool,
     latency_ms: int = 0, tokens_in: int = 0, tokens_out: int = 0, error_code: str | None = None,
@@ -2012,20 +2061,26 @@ def _log_bidradar_call(
     (_LICENSE_OVERRIDE_LOG)와 같은 append-only 패턴. 원래는 인메모리 리스트였는데
     (2026-09-20 최초 구현), 배포마다 서비스가 재시작되면서 실제로 BidRadar가
     접속했던 기록이 후속 배포 한 번으로 사라진 걸 사용자가 직접 겪고("1시간 전쯤
-    접속해왔던 내용은 왜 사라졌지?") 지적해서 파일 기반으로 전환."""
+    접속해왔던 내용은 왜 사라졌지?") 지적해서 파일 기반으로 전환. 상세 기록은
+    _MAX_BIDRADAR_LOG로 잘리지만, 누적 집계(_bump_bidradar_counters)는 별도로
+    영구 보존한다."""
+    at = time.strftime("%Y-%m-%dT%H:%M:%S")
     entry = {
-        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "endpoint": endpoint, "trace_id": trace_id, "success": success,
+        "at": at, "endpoint": endpoint, "trace_id": trace_id, "success": success,
         "latency_ms": latency_ms, "tokens_in": tokens_in, "tokens_out": tokens_out, "error_code": error_code,
     }
     _BIDRADAR_CALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _BIDRADAR_CALL_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _bump_bidradar_counters(endpoint, success, latency_ms, tokens_in, tokens_out, at)
 
 
 def _load_bidradar_call_log() -> list[dict]:
     """최신순(내림차순)으로 반환 — 기존 인메모리 리스트가 쓰던 순서와 맞춘다.
-    파일이 무한정 커지지 않게 오래된 줄은 읽을 때 정리한다(_MAX_BIDRADAR_LOG)."""
+    파일이 무한정 커지지 않게 오래된 줄은 읽을 때 정리한다(_MAX_BIDRADAR_LOG) —
+    **이 목록은 "최근 호출 기록"·일별 추이 그래프용 상세 로그일 뿐**, 누적 집계
+    숫자(총 건수·성공/실패·평균 지연시간 등)는 여기서 계산하지 않는다
+    (_load_bidradar_counters 참고 — 로그가 잘려도 숫자는 안 줄어들어야 하므로)."""
     if not _BIDRADAR_CALL_LOG_PATH.exists():
         return []
     text = _BIDRADAR_CALL_LOG_PATH.read_text(encoding="utf-8")
@@ -2036,6 +2091,26 @@ def _load_bidradar_call_log() -> list[dict]:
             for e in entries:
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
     return list(reversed(entries))
+
+
+def _backfill_bidradar_counters_if_missing() -> None:
+    """카운터 파일(_BIDRADAR_COUNTERS_PATH)은 이번에 새로 도입돼서 처음엔 항상 없다
+    — 그렇다고 0부터 다시 세면 이미 상세 로그에 쌓여있던 최근 기록(최대
+    _MAX_BIDRADAR_LOG건)까지 순간적으로 안 보이게 된다. 서버 기동 시 한 번, 지금
+    남아있는 상세 로그로 카운터를 채워준다. 상세 로그 자체가 이미 잘려있었을 수
+    있어(과거 버그) 그 이전에 사라진 호출까지는 복구 불가 — 하지만 이 시점부터는
+    다시는 안 잘리고 정확하게 누적된다."""
+    if _BIDRADAR_COUNTERS_PATH.exists():
+        return
+    call_log = _load_bidradar_call_log()  # 최신순
+    if not call_log:
+        return
+    for entry in reversed(call_log):  # 오래된 순으로 넣어야 first_call_at이 맞게 잡힘
+        _bump_bidradar_counters(
+            entry["endpoint"], entry["success"], entry.get("latency_ms", 0),
+            entry.get("tokens_in", 0), entry.get("tokens_out", 0), entry["at"],
+        )
+    print(f"[startup] BidRadar 누적 집계 백필 완료({len(call_log)}건 — 상세 로그가 그 이전에 이미 잘려있었다면 그 이전 호출은 복구 불가)")
 
 
 _BIDRADAR_ENDPOINT_ORDER = ["extract-requirements", "classify-topic", "classify-doc"]  # A·B·C 순(9~12절 표기와 통일)
