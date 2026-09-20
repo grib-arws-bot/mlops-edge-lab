@@ -108,19 +108,18 @@ def _load_gpu_llm_or_disable_gpu_profiles() -> None:
             del EDGE_PROFILES[key]
 
 
-_BIDRADAR_POOL_GPU_INDICES = [2, 2, 2, 3, 3, 3]
+_BIDRADAR_POOL_GPU_INDICES = [2, 2, 3, 3]
 # 이 서버 GPU 4장 중 0번은 기존 공유 GPU 인스턴스(_state["llm_gpu"], 통합관제·엣지
 # 에뮬레이션이 씀), 1번은 파인튜닝 전용(train/finetune_lora.py의 CUDA_VISIBLE_DEVICES=1)
 # — 이 둘과 안 겹치는 2·3번만 BidRadar 전용 풀에 쓴다. BidRadar 문의(2026-09-20,
 # classify-topic 순차 처리 병목) 계기로 도입 — 다른 기능은 손대지 않고 BidRadar
 # 3개 엔드포인트(classify-doc·classify-topic·extract-requirements)만 여기로 옮긴다.
 #
-# 한 GPU에 인스턴스 하나씩만 뒀던 최초 버전은 풀 크기가 2로 묶였는데(GPU 개수만큼만
-# 병렬), 양자화된 모델이 GPU 메모리를 2~3GB 정도만 써서(RTX 4000 Ada 20GB 대비 여유
-# 큼) 같은 GPU에 여러 인스턴스를 얹어도 된다 — 2·3번 GPU에 각 2개씩(총 4개)로 먼저
-# 늘렸다가, 실측해보니 GPU 메모리보다 연산(compute) 공유가 먼저 병목이 됨을 확인
-# (풀 2→4에서 동시 4건 개별 응답이 1.6초→3.0초로 거의 2배). 그래도 총 처리량은 계속
-# 늘어서, 사용자 결정으로 각 3개씩 총 6개까지 실측해보기로 함(2026-09-20).
+# 양자화된 모델이 GPU 메모리를 2~3GB 정도만 써서(RTX 4000 Ada 20GB 대비 여유 큼) 한
+# GPU에 인스턴스를 여러 개 얹을 수 있다 — 다만 진짜 병목은 메모리가 아니라 GPU 연산
+# (compute) 공유였다. 2(장당 1개)→4(장당 2개)→6(장당 3개)까지 실측한 결과 개별 요청
+# 지연이 1.6초→3.0초→4.2~5.6초로 계속 늘어서(총 처리량은 계속 늘지만 건당 지연도
+# 비례해서 늘어남), 사용자 결정으로 4(장당 2개)를 최종값으로 확정(2026-09-20).
 # GPU 0·1은 여전히 안 건드림.
 _bidradar_pool_locks: list[threading.Lock] = []
 _bidradar_pool_next = 0
