@@ -121,8 +121,6 @@ const AUTO_INTERVAL_MS = 2500;
 
 let tickIndex = -1;
 let approved = false;
-let autoTriggered = false;
-let autoTimer = null;
 const logRows = [];
 
 function isAbnormal(tick) { return !!tick && tick.DO_평균_pct < SOP_DO_MIN; }
@@ -201,36 +199,63 @@ function renderStepsCompact(steps) {
   </div>`).join('');
 }
 
-async function triggerAgentRecommendation() {
-  autoTriggered = true;
-  renderStage4Idle('이상 감지 → Agent가 SOP 기준으로 조치를 판단하는 중...');
-  const lastTick = TICKS[TICKS.length - 1];
-  const question = `지금 진행 중인 발효 탱크(로트 FMT-20260920-01)의 DO가 ${lastTick.DO_평균_pct}%로 떨어졌습니다. SOP 최소 기준(${SOP_DO_MIN}%) 미만인데, 지금 이 배치를 재작업으로 판정해서 종료해도 될까요?`;
+// 이상이 감지될 때마다(최초 1회 + 미조치로 인한 연장 시점마다) Agent를 매번 다시 호출해
+// 판단 이력을 쌓는다 — "이상 감지 1회당 판단 1회"를 그대로 히스토리로 보여주기 위함.
+const agentHistory = []; // {label, loading, error, steps, narrative} — 최신이 배열 앞쪽
+
+function renderStage4() {
+  const el = document.getElementById('stage-4');
+  let body = '<div class="stat">대기 중</div>';
+  if (agentHistory.length) {
+    body = agentHistory.map(h => {
+      if (h.loading) {
+        return `<div class="layer-step layer-4" style="padding:8px 10px; margin-bottom:8px;">
+          <strong style="font-size:0.85rem;">${escapeHtml(h.label)}</strong>
+          <div class="stat" style="margin-top:4px;">Agent가 SOP 기준으로 판단하는 중...</div>
+        </div>`;
+      }
+      if (h.error) {
+        return `<div class="layer-step layer-4" style="padding:8px 10px; margin-bottom:8px;">
+          <strong style="font-size:0.85rem;">${escapeHtml(h.label)}</strong>
+          <div class="stat" style="margin-top:4px;">요청 실패</div>
+        </div>`;
+      }
+      return `<div class="layer-step layer-4" style="padding:8px 10px; margin-bottom:8px;">
+        <strong style="font-size:0.85rem;">${escapeHtml(h.label)}</strong>
+        ${renderStepsCompact(h.steps)}
+        <div class="answer-card" style="margin-top:6px; padding:8px 10px;"><div style="white-space:pre-wrap; font-size:0.84rem;">${escapeHtml(h.narrative)}</div></div>
+      </div>`;
+    }).join('');
+  }
+  const anyLoading = agentHistory.some(h => h.loading);
+  const approveHtml = (agentHistory.length && !approved)
+    ? `<button id="approve-btn" style="margin-top:6px; width:100%;" ${anyLoading ? 'disabled' : ''}>운영자 조치 승인 → 교반 RPM 상향</button>`
+    : '';
+  el.innerHTML = `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div>${body}${approveHtml}`;
+  if (approveHtml) document.getElementById('approve-btn').addEventListener('click', approveAction);
+}
+
+async function triggerAgentRecommendation(tick, hoursIgnored) {
+  const label = hoursIgnored > 0 ? `⚠ 미조치 ${hoursIgnored}시간째 재판단` : '최초 이상 감지 → 판단';
+  const entry = { label, loading: true };
+  agentHistory.unshift(entry);
+  renderStage4();
+  const question = hoursIgnored > 0
+    ? `지금 진행 중인 발효 탱크(로트 FMT-20260920-01)의 DO가 ${tick.DO_평균_pct}%까지 떨어졌습니다(이상 감지 후 ${hoursIgnored}시간 경과, 아직 조치되지 않음). SOP 최소 기준(${SOP_DO_MIN}%) 미만인데, 지금 이 배치를 재작업으로 판정해서 종료해도 될까요?`
+    : `지금 진행 중인 발효 탱크(로트 FMT-20260920-01)의 DO가 ${tick.DO_평균_pct}%로 떨어졌습니다. SOP 최소 기준(${SOP_DO_MIN}%) 미만인데, 지금 이 배치를 재작업으로 판정해서 종료해도 될까요?`;
   try {
     const res = await fetch('/api/cosmetics/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
     });
     const data = await res.json();
-    const stage4 = document.getElementById('stage-4');
-    stage4.innerHTML = `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div>` +
-      renderStepsCompact(data.steps || []) +
-      `<div class="answer-card" style="margin-top:8px; padding:10px 12px;"><div style="white-space:pre-wrap; font-size:0.86rem;">${escapeHtml(data.narrative || '(응답 없음)')}</div></div>` +
-      `<button id="approve-btn" style="margin-top:10px; width:100%;">운영자 조치 승인 → 교반 RPM 상향</button>` +
-      `<div id="escalation-note" class="stat" style="color:var(--danger); margin-top:8px;"></div>`;
-    document.getElementById('approve-btn').addEventListener('click', approveAction);
+    entry.loading = false;
+    entry.steps = data.steps || [];
+    entry.narrative = data.narrative || '(응답 없음)';
   } catch (e) {
-    renderStage4Idle('요청 실패 — 다시 시도해주세요.');
+    entry.loading = false;
+    entry.error = true;
   }
-}
-
-function updateEscalationNote(hoursIgnored) {
-  const el = document.getElementById('escalation-note');
-  if (!el) return;
-  if (hoursIgnored >= ESCALATION.length) {
-    el.textContent = `⚠ 미조치 ${hoursIgnored}시간째 — 더 악화되지 않도록 시나리오를 여기서 고정했습니다. 승인 전까지는 위험 상태가 계속됩니다.`;
-  } else {
-    el.textContent = `⚠ 미조치 ${hoursIgnored}시간째 — 상태가 계속 악화되고 있습니다.`;
-  }
+  renderStage4();
 }
 
 function approveAction() {
@@ -240,65 +265,75 @@ function approveAction() {
   renderStage1(RECOVERY);
   renderStage2();
   renderStage3(RECOVERY, 99);
-  const stage4 = document.getElementById('stage-4');
-  const note = document.getElementById('escalation-note');
-  if (note) note.textContent = '';
-  stage4.insertAdjacentHTML('beforeend', `<div class="stat" style="margin-top:8px; color:var(--rule);">✅ 조치 완료 — Layer 1 장비 상태에 반영되었습니다.</div>`);
-  const approveBtn = document.getElementById('approve-btn');
-  approveBtn.disabled = true;
-  approveBtn.textContent = '승인 완료';
+  agentHistory.unshift({ label: '✅ 조치 완료', loading: false, steps: [], narrative: '운영자 승인 반영 — 교반 RPM 상향, Layer 1 장비 상태에 반영되었습니다.' });
+  renderStage4();
   const advBtn = document.getElementById('advance-btn');
   advBtn.disabled = true;
   advBtn.textContent = '시나리오 종료';
 }
 
-function advanceTick() {
-  if (approved || tickIndex >= ALL_TICKS.length - 1) { stopAuto(); return; }
-  tickIndex++;
-  const tick = ALL_TICKS[tickIndex];
-  const isEscalation = tickIndex >= TICKS.length;
-  pushLog(tick, isEscalation ? '미조치 지속 중 — 상태 악화' : null);
-  renderStage1(tick);
-  renderStage2();
-  renderStage3(tick, tickIndex);
-  if (isAbnormal(tick)) {
-    if (!autoTriggered) {
-      triggerAgentRecommendation();
-    } else if (isEscalation) {
-      updateEscalationNote(tickIndex - (TICKS.length - 1));
+let advancing = false;
+
+async function advanceTick() {
+  if (advancing || approved || tickIndex >= ALL_TICKS.length - 1) { stopAuto(); return; }
+  advancing = true;
+  try {
+    tickIndex++;
+    const tick = ALL_TICKS[tickIndex];
+    const isEscalation = tickIndex >= TICKS.length;
+    pushLog(tick, isEscalation ? '미조치 지속 중 — 상태 악화' : null);
+    renderStage1(tick);
+    renderStage2();
+    renderStage3(tick, tickIndex);
+    if (isAbnormal(tick)) {
+      const hoursIgnored = isEscalation ? tickIndex - (TICKS.length - 1) : 0;
+      await triggerAgentRecommendation(tick, hoursIgnored);
+    } else {
+      renderStage4Idle('이상 없음 — 대기 중');
     }
-  } else {
-    renderStage4Idle('이상 없음 — 대기 중');
+    if (tickIndex >= ALL_TICKS.length - 1) {
+      stopAuto();
+      document.getElementById('advance-btn').textContent = '더 진행할 시점 없음 (승인 대기)';
+      document.getElementById('advance-btn').disabled = true;
+    }
+  } finally {
+    advancing = false;
   }
-  if (tickIndex >= ALL_TICKS.length - 1) {
-    stopAuto();
-    document.getElementById('advance-btn').textContent = '더 진행할 시점 없음 (승인 대기)';
-    document.getElementById('advance-btn').disabled = true;
+}
+
+let autoRunning = false;
+
+async function runAutoLoop() {
+  while (autoRunning && !approved && tickIndex < ALL_TICKS.length - 1) {
+    await advanceTick();
+    if (autoRunning && !approved) await new Promise(r => setTimeout(r, AUTO_INTERVAL_MS));
   }
+  stopAuto();
 }
 
 function startAuto() {
-  if (autoTimer || approved) return;
-  autoTimer = setInterval(advanceTick, AUTO_INTERVAL_MS);
+  if (autoRunning || approved) return;
+  autoRunning = true;
   document.getElementById('auto-toggle').textContent = '자동 진행 정지 ⏸';
+  runAutoLoop();
 }
 
 function stopAuto() {
-  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  autoRunning = false;
   const btn = document.getElementById('auto-toggle');
   if (btn) btn.textContent = '자동 진행 시작 ▶▶';
 }
 
 function toggleAuto() {
-  if (autoTimer) stopAuto(); else startAuto();
+  if (autoRunning) stopAuto(); else startAuto();
 }
 
 function resetScenario() {
   stopAuto();
   tickIndex = -1;
   approved = false;
-  autoTriggered = false;
   logRows.length = 0;
+  agentHistory.length = 0;
   document.getElementById('advance-btn').disabled = false;
   document.getElementById('advance-btn').textContent = '다음 시점 진행 ▶';
   renderStage1(null);
