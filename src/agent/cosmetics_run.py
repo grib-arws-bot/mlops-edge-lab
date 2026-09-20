@@ -72,12 +72,14 @@ _SYSTEM_PROMPT = (
     "당신은 화장품 제조 현장의 AI 업무지원 에이전트입니다. 작업자의 질문에 답하기 위해 "
     "필요하면 search_sop(SOP 문서 검색), query_lot(생산 Lot 이력 조회), predict_condition"
     "(신규 배치 추천 조건, 과거 이력이 아닌 사전 추천일 때만) 도구를 사용하세요.\n"
+    "도구가 필요하면 판단 과정을 문장으로 먼저 설명하지 말고 곧바로 호출하세요 — "
+    "설명은 도구 결과를 받은 뒤 최종 답변에서만 하세요.\n"
     "반드시 지킬 규칙(이 순서로 먼저 판단하세요):\n"
     "1) 먼저 확인: 이 요청이 설비 제어(운전조건 실제 변경), 배치 합격/불합격 등 품질의 "
     "'최종 판정' 확정, 또는 COA 등 공식 문서 '확정'을 요청하는 것입니까? 그렇다면 당신은 "
-    "직접 판정·확정·실행하지 말고, search_sop으로 'SOP-QC-01 승인 정책'을 검색해 그 내용을 "
-    "인용하면서 '이 사안은 담당자 승인이 필요합니다'라고 답하세요. 이 규칙은 다른 모든 "
-    "규칙보다 우선합니다.\n"
+    "직접 판정·확정·실행하지 말고, 곧바로 search_sop으로 'SOP-QC-01 승인 정책'을 검색한 "
+    "뒤 그 내용을 인용하면서 '이 사안은 담당자 승인이 필요합니다'라고 답하세요. 이 규칙은 "
+    "다른 모든 규칙보다 우선합니다.\n"
     "2) 위 경우가 아니라면, 도구로 확인한 근거에 없는 내용은 답하지 말고 '자료에서 근거를 "
     "찾지 못했습니다'라고 답하세요.\n"
     "3) predict_condition의 결과는 학습된 AI 모델이 아니라 SOP 기준값 기반 참고용 추천이라는 "
@@ -85,10 +87,23 @@ _SYSTEM_PROMPT = (
 )
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+# 도구 호출 전에 장황한 설명을 늘어놓다가 max_tokens에 걸려 닫는 태그(</tool_call>) 전에
+# 잘리는 경우가 실측에서 나왔다(2026-09-20) — 프롬프트로 "바로 호출하라"고 유도했지만
+# 완전히 막힌다는 보장은 없어서, 닫히지 않은 tool_call도 마지막 수단으로 복구를 시도한다.
+_TOOL_CALL_UNCLOSED_RE = re.compile(r"<tool_call>\s*(\{.*\})\s*$", re.DOTALL)
 
 
 def _extract_tool_calls(content: str) -> list[dict]:
-    return [json.loads(m) for m in _TOOL_CALL_RE.findall(content or "")]
+    closed = _TOOL_CALL_RE.findall(content or "")
+    if closed:
+        return [json.loads(m) for m in closed]
+    m = _TOOL_CALL_UNCLOSED_RE.search(content or "")
+    if not m:
+        return []
+    try:
+        return [json.loads(m.group(1))]
+    except json.JSONDecodeError:
+        return []  # 중간에 잘린 JSON까지는 복구 안 함 — 억지로 짜맞추면 잘못된 도구 인자를 실행할 위험
 
 
 @dataclass
@@ -141,7 +156,7 @@ def run_cosmetics_agent(question: str, ctx: CosmeticsToolContext, llm: Llama, ma
     narrative = ""
 
     for _ in range(max_tool_turns):
-        result = llm.create_chat_completion(messages=messages, tools=_TOOLS_SCHEMA, temperature=0.0, max_tokens=500)
+        result = llm.create_chat_completion(messages=messages, tools=_TOOLS_SCHEMA, temperature=0.0, max_tokens=700)
         msg = result["choices"][0]["message"]
         content = msg.get("content") or ""
         tool_calls = msg.get("tool_calls") or None
