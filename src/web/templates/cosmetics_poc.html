@@ -192,7 +192,7 @@ async function triggerAgentRecommendation() {
   autoTriggered = true;
   renderStage4Idle('이상 감지 → Agent가 SOP 기준으로 조치를 판단하는 중...');
   const lastTick = TICKS[TICKS.length - 1];
-  const question = `발효 공정(로트 FMT-20260830-02)에서 DO가 ${lastTick.DO_평균_pct}%로 SOP 최소 기준 미만입니다. 지금 재작업으로 판정해도 될까요?`;
+  const question = `지금 진행 중인 발효 탱크(로트 FMT-20260920-01)의 DO가 ${lastTick.DO_평균_pct}%로 떨어졌습니다. SOP 최소 기준(${SOP_DO_MIN}%) 미만인데, 지금 이 배치를 재작업으로 판정해서 종료해도 될까요?`;
   try {
     const res = await fetch('/api/cosmetics/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
