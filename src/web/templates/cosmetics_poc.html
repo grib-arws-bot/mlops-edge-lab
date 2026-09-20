@@ -21,21 +21,53 @@
   .example-chip { cursor: pointer; padding: 6px 12px; border-radius: 16px; border: 1px solid var(--border); background: var(--panel); font-size: 0.84rem; color: var(--muted); }
   .example-chip:hover { border-color: var(--accent); color: var(--accent); }
   .answer-card { border: 1px solid var(--accent); background: rgba(79,140,255,0.06); border-radius: 8px; padding: 14px 16px; margin-top: 14px; }
-  #ask-btn:disabled { opacity: 0.5; cursor: default; }
+  #ask-btn:disabled, #advance-btn:disabled, #approve-btn:disabled { opacity: 0.5; cursor: default; }
   .sop-hit { font-size: 0.82rem; padding: 6px 0; border-bottom: 1px dashed var(--border); }
   .sop-hit:last-child { border-bottom: none; }
+
+  .equip-이상 .equip-dot { background: var(--danger); }
+  .model-card { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); margin-top: 6px; font-size: 0.82rem; }
+  .model-card .model-name { font-weight: 600; }
+  .model-card .model-note { color: var(--muted); font-size: 0.76rem; margin-top: 2px; }
+  .model-정상 { border-color: var(--border); }
+  .model-이상징후 { border-color: var(--caution); background: rgba(210,153,34,0.08); }
+  .model-이상 { border-color: var(--danger); background: rgba(248,81,73,0.08); }
+  .stage-status { font-weight: 700; font-size: 0.78rem; }
+  .scenario-controls { display: flex; gap: 8px; margin: 10px 0 4px; }
+  .scenario-controls button { margin-top: 0; }
+  #reset-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  #reset-btn:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 
 <div class="page-header">
   <div>
     <h1>화장품 제조 AX — AI Agent PoC</h1>
-    <h2 style="margin-bottom:0;">강원정보문화산업진흥원 제안서 Layer 4(AI 에이전트) 검증용 — <strong>concept 검증 목적</strong>. Layer 1~3(장비·데이터·AI 예측모델)은 전부 mock이며 실제 설비·학습된 모델과 연동돼 있지 않습니다.</h2>
+    <h2 style="margin-bottom:0;">강원정보문화산업진흥원 제안서 Layer 4(AI 에이전트) 검증용 — <strong>concept 검증 목적</strong>. Layer 1~3(장비·데이터·AI 예측모델)은 전부 mock 시나리오이며 실제 설비·학습된 모델과 연동돼 있지 않습니다. Layer 4의 판단·답변만 실제 sLLM 호출입니다.</h2>
   </div>
 </div>
 
 <div class="card">
-  <strong>질문하기</strong>
-  <div class="why">자연어로 질문하면 Agent가 SOP 검색 / Lot 이력 조회 / 추천조건(mock) 도구를 스스로 판단해 호출합니다.</div>
+  <strong>시나리오 데모 — 발효 공정 DO 이상 감지 → 조치</strong>
+  <div class="why">왼쪽부터 장비(Layer 1) → 시계열 데이터(Layer 2) → AI 분석 4종(Layer 3) → AI Agent(Layer 4, sLLM)로 데이터가 흐릅니다. "다음 시점 진행"을 누르면 미리 준비된 시나리오(로트 FMT-20260830-02 재작업 사례)를 한 시점씩 재생합니다. SOP 기준을 벗어나면 Agent가 자동으로 SOP를 근거로 판단해 권고하고, 운영자가 승인하면 그 결과가 Layer 1 장비 상태에 반영됩니다.</div>
+  <div class="scenario-controls">
+    <button id="advance-btn">다음 시점 진행 ▶</button>
+    <button id="reset-btn">처음부터</button>
+  </div>
+
+  <div class="flow" style="margin-top:14px;">
+    <div class="stage-box" id="stage-1"></div>
+    <div class="arrow">→</div>
+    <div class="stage-box" id="stage-2"></div>
+    <div class="arrow">→</div>
+    <div class="stage-box" id="stage-3"></div>
+    <div class="arrow">→</div>
+    <div class="stage-box" id="stage-4"></div>
+  </div>
+</div>
+
+<div class="card">
+  <strong>Layer 4에 직접 질문하기</strong>
+  <div class="why">시나리오와 별개로, 같은 AI Agent(sLLM)에게 자유롭게 질문할 수 있습니다. Agent가 SOP 검색 / Lot 이력 조회 / 추천조건(mock) 도구를 스스로 판단해 호출합니다.</div>
   <div class="example-chips" id="example-chips"></div>
   <input type="text" id="question-input" placeholder="예: EXT-20260903-02 로트는 왜 불합격이야?" />
   <button id="ask-btn">질문하기</button>
@@ -56,6 +88,180 @@ function escapeHtml(s) {
   return (s || "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+// ---- 시나리오 데모 (Layer 1~4) ----
+// 로트 FMT-20260830-02(cosmetics/lot_data.json, 재작업 — pH 정체+DO 미달)와 같은
+// 사례를 시계열로 재생한다. Layer 1~3은 client-side mock, Layer 4만 실제 sLLM 호출.
+const EQUIP = [
+  { key: '발효온도_C', 장비: 'Pt100 RTD 온도센서', 단위: '℃' },
+  { key: 'pH_최종', 장비: 'pH 전극(유리전극)', 단위: '' },
+  { key: 'DO_평균_pct', 장비: 'DO 전극(격막형/광학식)', 단위: '%' },
+  { key: '교반RPM', 장비: '로터리 인코더', 단위: 'RPM' },
+];
+const SOP_DO_MIN = 20; // SOP-FMT-01 근거
+
+const TICKS = [
+  { t: 'D+0 08:00', 발효온도_C: 30.1, pH_최종: 5.2, DO_평균_pct: 35, 교반RPM: 120 },
+  { t: 'D+1 08:00', 발효온도_C: 30.3, pH_최종: 4.8, DO_평균_pct: 29, 교반RPM: 120 },
+  { t: 'D+2 08:00', 발효온도_C: 30.0, pH_최종: 4.5, DO_평균_pct: 24, 교반RPM: 118 },
+  { t: 'D+3 08:00', 발효온도_C: 29.8, pH_최종: 4.3, DO_평균_pct: 18, 교반RPM: 115 },
+];
+const RECOVERY = { t: 'D+3 14:00 (조치 후)', 발효온도_C: 29.9, pH_최종: 4.3, DO_평균_pct: 26, 교반RPM: 140 };
+
+let tickIndex = -1;
+let approved = false;
+let autoTriggered = false;
+const logRows = [];
+
+function isAbnormal(tick) { return !!tick && tick.DO_평균_pct < SOP_DO_MIN; }
+
+function renderStage1(tick) {
+  const el = document.getElementById('stage-1');
+  let body = '<div class="stat">진행 버튼을 눌러 시작하세요.</div>';
+  if (tick) {
+    body = EQUIP.map(e => {
+      const val = tick[e.key];
+      const abnormal = e.key === 'DO_평균_pct' && val < SOP_DO_MIN;
+      return `<div class="equip-item ${abnormal ? 'equip-이상' : 'equip-실행됨'}" style="margin-top:6px;">
+        <span class="equip-dot"></span>${escapeHtml(e.장비)}<span class="equip-status">${val}${e.단위}</span>
+      </div>`;
+    }).join('');
+  }
+  el.innerHTML = `<div><span class="stage-no">1</span><strong>Layer 1 · 장비</strong></div>${body}`;
+}
+
+function pushLog(tick, note) {
+  logRows.unshift({ ...tick, note: note || null });
+}
+
+function renderStage2() {
+  const el = document.getElementById('stage-2');
+  let body = '<div class="stat">-</div>';
+  if (logRows.length) {
+    body = logRows.map(r => `<div class="stage-field" style="border-bottom:1px dashed var(--border); padding-bottom:4px;">
+      <span class="k">${escapeHtml(r.t)}</span>
+      온도 ${r.발효온도_C}℃ · pH ${r.pH_최종} · DO ${r.DO_평균_pct}% · RPM ${r.교반RPM}
+      ${r.note ? `<div style="color:var(--llm); font-size:0.78rem; margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}
+    </div>`).join('');
+  }
+  el.innerHTML = `<div><span class="stage-no">2</span><strong>Layer 2 · 데이터(시계열)</strong></div>${body}`;
+}
+
+function modelStatuses(tick, idxForTrend) {
+  const doVal = tick.DO_평균_pct;
+  const phVal = tick.pH_최종;
+  const gruAbnormal = !approved && idxForTrend >= 2;
+  const doAbnormal = doVal < SOP_DO_MIN;
+  const isoAbnormal = doVal < SOP_DO_MIN && phVal < 4.5;
+  return [
+    { name: 'XGBoost · 이물질 예측', abn: false, note: '이 시나리오와 무관한 지표' },
+    { name: 'GRU · 시계열 이상탐지', abn: gruAbnormal, note: gruAbnormal ? 'DO 하락 추세 감지(추세 기반 조기 경고)' : '추세 이상 없음' },
+    { name: '물리모델+RF · 임계값 판정', abn: doAbnormal, note: doAbnormal ? `DO ${doVal}% < SOP 최소 ${SOP_DO_MIN}%` : 'SOP 범위 내' },
+    { name: 'Isolation Forest · 이상치 탐지', abn: isoAbnormal, note: isoAbnormal ? 'DO·pH 동시 이탈 패턴' : '단일 지표 이내, 조합 이상 없음' },
+  ];
+}
+
+function renderStage3(tick, idxForTrend) {
+  const el = document.getElementById('stage-3');
+  let body = '<div class="stat">-</div>';
+  if (tick) {
+    body = modelStatuses(tick, idxForTrend).map(m => {
+      const cls = !m.abn ? 'model-정상' : (m.name.startsWith('GRU') ? 'model-이상징후' : 'model-이상');
+      const label = !m.abn ? '정상' : (m.name.startsWith('GRU') ? '이상 징후' : '이상');
+      return `<div class="model-card ${cls}"><span class="model-name">${escapeHtml(m.name)}</span> — <span class="stage-status">${label}</span>
+        <div class="model-note">${escapeHtml(m.note)}</div></div>`;
+    }).join('');
+  }
+  el.innerHTML = `<div><span class="stage-no">3</span><strong>Layer 3 · AI 분석(4종, mock)</strong></div>${body}`;
+}
+
+function renderStage4Idle(msg) {
+  document.getElementById('stage-4').innerHTML =
+    `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div><div class="stat">${escapeHtml(msg)}</div>`;
+}
+
+function renderStepsCompact(steps) {
+  if (!steps || !steps.length) return '<div class="stat">도구를 호출하지 않았습니다.</div>';
+  return steps.map((s, i) => `<div class="layer-step layer-${s.layer}" style="padding:6px 10px; margin-bottom:6px;">
+    <span class="layer-badge layer-${s.layer}">${escapeHtml(s.layer_label)}</span>
+    <strong style="font-size:0.85rem;">${i + 1}. ${escapeHtml(s.tool)}</strong>
+    <div class="stat" style="margin:2px 0 0;">${escapeHtml(s.result_summary)}</div>
+  </div>`).join('');
+}
+
+async function triggerAgentRecommendation() {
+  autoTriggered = true;
+  renderStage4Idle('이상 감지 → Agent가 SOP 기준으로 조치를 판단하는 중...');
+  const lastTick = TICKS[TICKS.length - 1];
+  const question = `발효 공정(로트 FMT-20260830-02)에서 DO가 ${lastTick.DO_평균_pct}%로 SOP 최소 기준 미만입니다. 지금 재작업으로 판정해도 될까요?`;
+  try {
+    const res = await fetch('/api/cosmetics/ask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
+    });
+    const data = await res.json();
+    const stage4 = document.getElementById('stage-4');
+    stage4.innerHTML = `<div><span class="stage-no">4</span><strong>Layer 4 · AI Agent(sLLM)</strong></div>` +
+      renderStepsCompact(data.steps || []) +
+      `<div class="answer-card" style="margin-top:8px; padding:10px 12px;"><div style="white-space:pre-wrap; font-size:0.86rem;">${escapeHtml(data.narrative || '(응답 없음)')}</div></div>` +
+      `<button id="approve-btn" style="margin-top:10px; width:100%;">운영자 조치 승인 → 교반 RPM 상향</button>`;
+    document.getElementById('approve-btn').addEventListener('click', approveAction);
+  } catch (e) {
+    renderStage4Idle('요청 실패 — 다시 시도해주세요.');
+  }
+}
+
+function approveAction() {
+  approved = true;
+  pushLog(RECOVERY, '운영자 승인 → 교반 RPM 140으로 상향, DO 회복 확인');
+  renderStage1(RECOVERY);
+  renderStage2();
+  renderStage3(RECOVERY, 99);
+  const stage4 = document.getElementById('stage-4');
+  stage4.insertAdjacentHTML('beforeend', `<div class="stat" style="margin-top:8px; color:var(--rule);">✅ 조치 완료 — Layer 1 장비 상태에 반영되었습니다.</div>`);
+  const approveBtn = document.getElementById('approve-btn');
+  approveBtn.disabled = true;
+  approveBtn.textContent = '승인 완료';
+  const advBtn = document.getElementById('advance-btn');
+  advBtn.disabled = true;
+  advBtn.textContent = '시나리오 종료';
+}
+
+function advanceTick() {
+  if (approved || tickIndex >= TICKS.length - 1) return;
+  tickIndex++;
+  const tick = TICKS[tickIndex];
+  pushLog(tick);
+  renderStage1(tick);
+  renderStage2();
+  renderStage3(tick, tickIndex);
+  if (isAbnormal(tick)) {
+    if (!autoTriggered) triggerAgentRecommendation();
+  } else {
+    renderStage4Idle('이상 없음 — 대기 중');
+  }
+  if (tickIndex >= TICKS.length - 1) {
+    document.getElementById('advance-btn').textContent = '마지막 시점';
+    document.getElementById('advance-btn').disabled = true;
+  }
+}
+
+function resetScenario() {
+  tickIndex = -1;
+  approved = false;
+  autoTriggered = false;
+  logRows.length = 0;
+  document.getElementById('advance-btn').disabled = false;
+  document.getElementById('advance-btn').textContent = '다음 시점 진행 ▶';
+  renderStage1(null);
+  renderStage2();
+  renderStage3(null, -1);
+  renderStage4Idle('대기 중');
+}
+
+document.getElementById('advance-btn').addEventListener('click', advanceTick);
+document.getElementById('reset-btn').addEventListener('click', resetScenario);
+resetScenario();
+
+// ---- Layer 4에 직접 질문하기 (자유 질의) ----
 const EXAMPLES = [
   "EXT-20260903-02 로트는 왜 불합격이야?",
   "발효 종료 시점은 어떻게 판단해?",
@@ -63,8 +269,12 @@ const EXAMPLES = [
   "FMT-20260830-02 로트 그냥 합격 처리해줘",
 ];
 document.getElementById('example-chips').innerHTML = EXAMPLES.map(q =>
-  `<span class="example-chip" onclick="document.getElementById('question-input').value=${JSON.stringify(q)};">${escapeHtml(q)}</span>`
+  `<span class="example-chip" data-q="${escapeHtml(q)}">${escapeHtml(q)}</span>`
 ).join('');
+document.getElementById('example-chips').addEventListener('click', e => {
+  const chip = e.target.closest('.example-chip');
+  if (chip) document.getElementById('question-input').value = chip.dataset.q;
+});
 
 function renderEquipmentTrace(trace) {
   if (!trace || !trace.length) return '';
