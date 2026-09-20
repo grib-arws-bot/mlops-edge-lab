@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import llama_cpp
 from llama_cpp import Llama
 import numpy as np
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -107,6 +108,67 @@ def _load_gpu_llm_or_disable_gpu_profiles() -> None:
             del EDGE_PROFILES[key]
 
 
+_BIDRADAR_POOL_GPU_INDICES = [2, 3]
+# 이 서버 GPU 4장 중 0번은 기존 공유 GPU 인스턴스(_state["llm_gpu"], 통합관제·엣지
+# 에뮬레이션이 씀), 1번은 파인튜닝 전용(train/finetune_lora.py의 CUDA_VISIBLE_DEVICES=1)
+# — 이 둘과 안 겹치는 2·3번만 BidRadar 전용 풀에 쓴다. BidRadar 문의(2026-09-20,
+# classify-topic 순차 처리 병목) 계기로 도입 — 다른 기능은 손대지 않고 BidRadar
+# 3개 엔드포인트(classify-doc·classify-topic·extract-requirements)만 여기로 옮긴다.
+_bidradar_pool_locks: list[threading.Lock] = []
+_bidradar_pool_next = 0
+_bidradar_pool_next_lock = threading.Lock()
+
+
+def _load_bidradar_pool() -> None:
+    """GPU 2·3에 각각 독립된 모델 인스턴스를 올려 BidRadar 요청을 실제로 동시에(최대
+    풀 크기만큼) 처리할 수 있게 한다. split_mode=NONE + main_gpu로 명시적으로 고정해야
+    한다 — 기본값(LAYER 분산)으로 두면 작은 모델도 보이는 GPU 전부에 레이어를 흩어
+    올려서(fuser -v /dev/nvidia*로 실제 확인, 기존 llm_gpu 인스턴스가 GPU 0~3을 전부
+    쥐고 있었음) 새로 올리는 풀이 기존 인스턴스·파인튜닝과 자원을 나눠 쓰게 된다.
+    GPU 로드가 실패해도(예: CUDA 미지원 빌드) 서버 기동 자체는 막지 않고, 그 GPU는
+    풀에서 빼고 남은 것만 쓴다 — 전부 실패하면 _run_bidradar_llm()이 기존 공유 CPU
+    인스턴스로 조용히 폴백한다."""
+    global _bidradar_pool_locks
+    pool = []
+    for idx in _BIDRADAR_POOL_GPU_INDICES:
+        try:
+            llm = Llama(
+                model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=4, n_gpu_layers=-1,
+                split_mode=llama_cpp.LLAMA_SPLIT_MODE_NONE, main_gpu=idx, verbose=False,
+            )
+            pool.append(llm)
+        except Exception as exc:  # noqa: BLE001 — 이 GPU만 건너뛰고 계속
+            print(f"[startup] BidRadar 풀 GPU {idx} 로드 실패, 건너뜀: {exc}")
+    _state["bidradar_pool"] = pool
+    _bidradar_pool_locks = [threading.Lock() for _ in pool]
+    print(f"[startup] BidRadar 병렬 풀 {len(pool)}/{len(_BIDRADAR_POOL_GPU_INDICES)}개 로드 완료")
+
+
+def _run_bidradar_llm(fn):
+    """fn(llm)을 BidRadar 전용 풀에서 실행한다. 실행 스레드(run_in_executor) 안에서
+    호출해야 한다 — 락 획득이 블로킹이라 이벤트 루프에서 직접 부르면 안 됨(기존
+    _llm_lock 사용 패턴과 동일). 유휴 워커가 있으면 즉시 쓰고, 전부 바쁘면 라운드로빈
+    으로 하나를 골라 그 자리에서 줄을 선다 — 풀 크기(2)를 넘는 동시 요청은 자연히
+    대기하지만, 순차 하나였을 때보다는 항상 빠르거나 같다. 풀이 비어있으면(로드 실패)
+    기존 공유 CPU 인스턴스로 폴백 — 병렬은 못 해도 BidRadar 요청 자체는 계속 처리."""
+    global _bidradar_pool_next
+    pool = _state.get("bidradar_pool") or []
+    if not pool:
+        with _llm_lock:
+            return fn(_state["llm"])
+    for llm, lock in zip(pool, _bidradar_pool_locks):
+        if lock.acquire(blocking=False):
+            try:
+                return fn(llm)
+            finally:
+                lock.release()
+    with _bidradar_pool_next_lock:
+        idx = _bidradar_pool_next
+        _bidradar_pool_next = (idx + 1) % len(pool)
+    with _bidradar_pool_locks[idx]:
+        return fn(pool[idx])
+
+
 def _cleanup_orphaned_edge_scopes() -> None:
     """서버가 막 기동했다는 건, 이전 프로세스가 추적하던 진행 중 시뮬레이션은 개념적으로
     전부 끝났어야 한다는 뜻이다 — 그런데 엣지 에뮬레이션은 systemd 스코프로 독립적인
@@ -159,6 +221,7 @@ async def lifespan(_app: FastAPI):
     _state["cosmetics_ctx"] = CosmeticsToolContext()
     _state["llm"] = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=8, verbose=False)
     _load_gpu_llm_or_disable_gpu_profiles()
+    _load_bidradar_pool()
     _load_edu_rag_or_disable()
     _ensure_deck_pdf()
     _init_control_room()
@@ -2025,10 +2088,9 @@ async def bidradar_classify_doc(request: Request):
             {"role": "system", "content": _BIDRADAR_CLASSIFY_DOC_PROMPT},
             {"role": "user", "content": f"[문서 일부]\n{input_text}"},
         ]
-        # _state["llm"]은 산업안전 통합관제·AI튜터·AI토론과 공유하는 동일 인스턴스라
-        # _llm_lock으로 직렬화한다(SIGSEGV 원인, 89번) — 여기도 예외 없이 적용.
-        with _llm_lock:
-            result = _state["llm"].create_chat_completion(messages=messages, temperature=0.0, max_tokens=max_tokens)
+        # BidRadar 전용 병렬 풀(GPU 2·3)로 처리 — 다른 기능과 공유하는 _state["llm"]과
+        # 분리해서 동시 요청을 실제로 병렬 처리한다(BidRadar 문의, 2026-09-20).
+        result = _run_bidradar_llm(lambda llm: llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=max_tokens))
         raw = result["choices"][0]["message"]["content"]
         usage = result.get("usage", {})
         return raw, usage
@@ -2116,8 +2178,8 @@ async def bidradar_classify_topic(request: Request):
             {"role": "system", "content": _BIDRADAR_CLASSIFY_TOPIC_PROMPT},
             {"role": "user", "content": user},
         ]
-        with _llm_lock:
-            result = _state["llm"].create_chat_completion(messages=messages, temperature=0.0, max_tokens=400)
+        # BidRadar 전용 병렬 풀(GPU 2·3) — classify-doc과 동일한 이유로 전환.
+        result = _run_bidradar_llm(lambda llm: llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=400))
         return result["choices"][0]["message"]["content"], result.get("usage", {})
 
     try:
@@ -2188,20 +2250,17 @@ _BIDRADAR_EXTRACT_SUMMARY_PROMPT = (
 def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
     """백그라운드 스레드(run_in_executor)에서 실행 — 청크 수만큼 순차 LLM 호출이
     필요해(레이턴시 근본 원인) 동기 응답 대신 job_id를 먼저 돌려주고 여기서 진행한다
-    (BidRadar 질의 2026-09-20, 의사결정_로그 참고). GPU 인스턴스가 있으면 그걸 쓰고
-    (CPU 대비 실측 약 3.7배, quantization_pipeline 벤치마크), 없으면 CPU로 폴백한다.
-    control-room의 GPU 프로파일 추론과 동일하게 _gpu_llm_busy를 세워서 학습이 끼어들지
-    않게 한다."""
-    global _gpu_llm_busy
+    (BidRadar 질의 2026-09-20, 의사결정_로그 참고). BidRadar 전용 병렬 풀(GPU 2·3)을
+    쓴다 — 청크 호출마다 _run_bidradar_llm()이 그 시점에 비어있는 워커를 고르므로, 이
+    한 건의 job이 처리되는 동안에도 다른 BidRadar 요청이 나머지 워커로 끼어들 수 있다
+    (한 job이 워커 하나를 통째로 독점하지 않음). 풀이 비어있으면(로드 실패) 공유 CPU
+    인스턴스로 조용히 폴백한다 — 이땐 다른 기능과 같은 _llm_lock을 타므로 기존처럼
+    _gpu_llm_busy로 학습과 조율할 필요가 없다(GPU 2·3은 파인튜닝이 쓰는 GPU 1과 겹치지
+    않아 애초에 조율 대상이 아님)."""
     job = _bidradar_jobs[job_id]
     start = time.perf_counter()
+    use_pool = bool(_state.get("bidradar_pool"))
 
-    use_gpu = _state.get("llm_gpu") is not None
-    llm = _state["llm_gpu"] if use_gpu else _state["llm"]
-    lock = _llm_gpu_lock if use_gpu else _llm_lock
-
-    if use_gpu:
-        _gpu_llm_busy = True
     try:
         chunks = chunk_text(input_text, target_size=2500, overlap=200)
         job["chunks_total"] = len(chunks)
@@ -2213,8 +2272,7 @@ def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
                 {"role": "system", "content": _BIDRADAR_EXTRACT_REQ_PROMPT},
                 {"role": "user", "content": f"[문서 조각]\n{chunk}"},
             ]
-            with lock:
-                result = llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=800)
+            result = _run_bidradar_llm(lambda llm: llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=800))
             raw = result["choices"][0]["message"]["content"]
             usage = result.get("usage", {})
             total_in += usage.get("prompt_tokens", 0)
@@ -2253,8 +2311,7 @@ def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
                 {"role": "system", "content": _BIDRADAR_EXTRACT_SUMMARY_PROMPT},
                 {"role": "user", "content": f"[문서 조각]\n{chunks[0]}"},
             ]
-            with lock:
-                result = llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=400)
+            result = _run_bidradar_llm(lambda llm: llm.create_chat_completion(messages=messages, temperature=0.0, max_tokens=400))
             raw = result["choices"][0]["message"]["content"]
             usage = result.get("usage", {})
             total_in += usage.get("prompt_tokens", 0)
@@ -2270,7 +2327,7 @@ def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
         job.update({
             "status": "done",
             "output": {"requirements": all_requirements, "summary": summary},
-            "model": "Qwen3-4B-Instruct-2507-Q4_K_M" + ("-gpu" if use_gpu else "-cpu"),
+            "model": "Qwen3-4B-Instruct-2507-Q4_K_M" + ("-gpu-pool" if use_pool else "-cpu"),
             "chunks_processed": len(chunks),
             "tokens_in": total_in, "tokens_out": total_out, "latency_ms": latency_ms,
         })
@@ -2279,9 +2336,6 @@ def _bidradar_extract_job_worker(job_id: str, input_text: str) -> None:
         latency_ms = round((time.perf_counter() - start) * 1000)
         job.update({"status": "error", "error": {"code": "inference_failed", "message": str(exc)}, "latency_ms": latency_ms})
         _log_bidradar_call("extract-requirements", job["trace_id"], False, latency_ms=latency_ms, error_code="inference_failed")
-    finally:
-        if use_gpu:
-            _gpu_llm_busy = False
 
 
 @app.post("/v1/extract-requirements")
