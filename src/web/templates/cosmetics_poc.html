@@ -197,12 +197,6 @@ let currentTickData = null; // {발효온도_C, pH_최종, DO_평균_pct, 교반
 let mode = 'normal'; // 'normal' | 'worsening' — 다음 시점을 어느 방향으로 생성할지
 let tickCount = 0;
 let abnormalStreak = 0; // 연속 이상 시점 수(0=정상, 1=방금 감지, 2 이상=미조치 지속)
-// 승인 대기 중인 이상 판단이 있는지 — 예전엔 "approved"가 한 번 true가 되면 시나리오
-// 전체가 끝나는 1회성 플래그였는데, 데이터가 계속 흐르는 지금 구조에선 승인 후에도
-// 시뮬레이션이 계속돼야 맞다("악화로 간 이후에 운영자 조치를 해도 새 데이터가 생성되지
-// 않는다"는 실측 지적, 2026-09-20). 그래서 "시나리오가 끝났는지"가 아니라 "지금 이
-// 판단에 대한 승인 버튼을 보여줄지"만 나타내는 값으로 바꿨다.
-let pendingApproval = false;
 const logRows = [];
 // "처음부터"를 누를 때마다 1씩 증가 — 그 이전에 시작된 비동기 호출(LLM 응답 대기 중)이
 // 나중에 돌아와도 이 값이 바뀌었으면 자기 결과를 화면에 반영하지 않고 조용히 버린다.
@@ -283,10 +277,6 @@ function renderStage3(tick) {
   el.innerHTML = `<div><span class="stage-no">3</span><strong>Layer 3 · AI 분석(4종, mock)</strong></div>${body}`;
 }
 
-function renderStage4Idle(msg) {
-  document.getElementById('stage-4-body').innerHTML = `<div class="stat">${escapeHtml(msg)}</div>`;
-}
-
 function selectedEdgeProfile() {
   const el = document.getElementById('edge-profile-select');
   return el ? el.value : 'server';
@@ -317,24 +307,32 @@ function renderEntryDetail(h) {
 
 // Layer 4 칸에는 최신 판단 1건만 보여준다 — 이상감지마다 다시 호출하다 보니 카드가
 // 아래로 계속 늘어나 보기 어려워서(사용자 지적), 이전 판단은 모달 팝업으로 뺐다.
+//
+// 승인 버튼은 특정 LLM 호출의 결과가 아니라 "지금 실제로 이상 상태인지"에서 직접
+// 계산한다("반복적인 LLM 실행 때문에 승인 버튼이 사라진다 — 누적된 문제를 해결하는
+// 용도로 계속 떠 있으면 좋겠다"는 지적, 2026-09-20). 그래서 다음 이상감지로 새 판단이
+// 로딩 중이어도, 그 전 판단이 몇 개가 쌓였어도, 현재 값이 SOP 기준을 벗어나 있는 한
+// 버튼은 항상 눌러서 즉시 조치할 수 있다 — 특정 LLM 응답의 loading 상태와 무관.
 function renderStage4() {
   const bodyEl = document.getElementById('stage-4-body');
-  if (!agentHistory.length) {
-    bodyEl.innerHTML = `<div class="stat">대기 중</div>`;
-    return;
+  const abnormalNow = !!currentTickData && isAbnormal(currentTickData);
+  let topHtml;
+  if (agentHistory.length) {
+    const latest = agentHistory[0];
+    topHtml = `<div class="layer-step layer-4" style="padding:8px 10px; margin-bottom:8px;">
+      <strong style="font-size:0.85rem;">${escapeHtml(latest.label)}</strong>
+      ${renderEntryDetail(latest)}
+    </div>`;
+  } else {
+    topHtml = `<div class="stat">${abnormalNow ? '이상 감지됨 — 판단 대기' : '이상 없음 — 대기 중'}</div>`;
   }
-  const latest = agentHistory[0];
-  const latestHtml = `<div class="layer-step layer-4" style="padding:8px 10px; margin-bottom:8px;">
-    <strong style="font-size:0.85rem;">${escapeHtml(latest.label)}</strong>
-    ${renderEntryDetail(latest)}
-  </div>`;
-  const approveHtml = pendingApproval
-    ? `<button id="approve-btn" style="margin-top:6px; width:100%;" ${latest.loading ? 'disabled' : ''}>운영자 조치 승인 → 교반 RPM 상향</button>`
+  const approveHtml = abnormalNow
+    ? `<button id="approve-btn" style="margin-top:6px; width:100%;">운영자 조치 승인 → 교반 RPM 상향</button>`
     : '';
   const historyHtml = agentHistory.length > 1
-    ? `<button id="history-btn" style="width:100%; background:transparent; border:1px solid var(--border); color:var(--muted);">이전 판단 이력 보기 (${agentHistory.length}건)</button>`
+    ? `<button id="history-btn" style="width:100%; background:transparent; border:1px solid var(--border); color:var(--muted); margin-top:6px;">이전 판단 이력 보기 (${agentHistory.length}건)</button>`
     : '';
-  bodyEl.innerHTML = `${latestHtml}${approveHtml}${historyHtml}`;
+  bodyEl.innerHTML = `${topHtml}${approveHtml}${historyHtml}`;
   if (approveHtml) document.getElementById('approve-btn').addEventListener('click', approveAction);
   if (historyHtml) document.getElementById('history-btn').addEventListener('click', openHistoryModal);
 }
@@ -379,9 +377,6 @@ let agentBusy = false;
 
 async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
   agentBusy = true;
-  // 로딩 중엔 승인 버튼을 감춘다(직전 판단에 대한 승인 버튼이 새 판단 로딩 중에도
-  // "비활성화된 채" 계속 보이면 헷갈린다 — 판단이 실제로 끝났을 때만 다시 켠다).
-  pendingApproval = false;
   const label = hoursIgnored > 0 ? `⚠ 미조치 ${hoursIgnored}시간째 재판단` : '최초 이상 감지 → 판단';
   const profileEl = document.getElementById('edge-profile-select');
   const profileLabel = profileEl ? profileEl.selectedOptions[0].textContent : '';
@@ -411,7 +406,6 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
   // 응답을 기다리는 사이 "처음부터"가 눌려 다른 시나리오가 시작됐으면, 이 늦게 도착한
   // 결과는 화면에 반영하지 않는다(scenarioGen 방식 — 위 선언부 주석 참고).
   if (myGen !== scenarioGen) return;
-  pendingApproval = true;
   renderStage4();
   // 자동 진행을 여기서 멈추지 않는다 — "sLLM 시작되면 데이터 유입이 끊기고, 끝나도
   // 다음 이상상황에 대한 LLM이 안 도는" 문제를 사용자가 실측으로 지적(2026-09-20).
@@ -425,7 +419,6 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
 // 운영자 조치를 해도 새로운 데이터가 생성되지 않는다"는 실측 지적, 2026-09-20 — 예전엔
 // 승인이 시나리오를 영구 종료시키는 1회성 동작이었다).
 function approveAction() {
-  pendingApproval = false;
   mode = 'normal';
   tickCount++;
   const tick = recoveryTick(currentTickData || randomStartTick());
@@ -460,13 +453,12 @@ function advanceTick() {
   if (abnormalNow) {
     if (!agentBusy) {
       const hoursIgnored = abnormalStreak - 1; // 최초 감지는 0
-      triggerAgentRecommendation(tick, hoursIgnored, myGen);
+      triggerAgentRecommendation(tick, hoursIgnored, myGen); // 내부에서 renderStage4() 호출
     }
     // agentBusy가 이미 true면(이전 이상감지에 대한 판단이 아직 진행 중) 새로 호출하지
-    // 않는다 — 그 응답이 오면 triggerAgentRecommendation이 알아서 자동진행을 멈춘다.
+    // 않는다 — 승인 버튼은 이미 떠 있으므로 매 틱 다시 그릴 필요 없다.
   } else {
-    pendingApproval = false;
-    if (!agentBusy) renderStage4Idle('이상 없음 — 대기 중');
+    renderStage4(); // 정상으로 돌아왔으면 승인 버튼을 다시 숨긴다
   }
 }
 
@@ -515,7 +507,6 @@ function resetScenario() {
   mode = 'normal';
   tickCount = 0;
   abnormalStreak = 0;
-  pendingApproval = false;
   logRows.length = 0;
   agentHistory.length = 0;
   document.getElementById('advance-btn').disabled = false;
@@ -525,7 +516,7 @@ function resetScenario() {
   renderStage1(null);
   renderStage2();
   renderStage3(null);
-  renderStage4Idle('대기 중');
+  renderStage4();
 }
 
 document.getElementById('advance-btn').addEventListener('click', advanceTick);
