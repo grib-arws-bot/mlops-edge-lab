@@ -379,6 +379,9 @@ let agentBusy = false;
 
 async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
   agentBusy = true;
+  // 로딩 중엔 승인 버튼을 감춘다(직전 판단에 대한 승인 버튼이 새 판단 로딩 중에도
+  // "비활성화된 채" 계속 보이면 헷갈린다 — 판단이 실제로 끝났을 때만 다시 켠다).
+  pendingApproval = false;
   const label = hoursIgnored > 0 ? `⚠ 미조치 ${hoursIgnored}시간째 재판단` : '최초 이상 감지 → 판단';
   const profileEl = document.getElementById('edge-profile-select');
   const profileLabel = profileEl ? profileEl.selectedOptions[0].textContent : '';
@@ -410,10 +413,11 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
   if (myGen !== scenarioGen) return;
   pendingApproval = true;
   renderStage4();
-  // 판단이 나온 시점엔 자동 진행을 멈춰 운영자가 승인/방치를 직접 고르게 한다. 데이터
-  // 생성(Layer 1~3)은 이 호출이 도는 동안에도 계속됐으므로, 여기서 멈추는 건 "자동
-  // 진행"뿐이고 "다음 시점 진행" 수동 클릭은 언제든 가능하다(2026-09-20).
-  stopAuto();
+  // 자동 진행을 여기서 멈추지 않는다 — "sLLM 시작되면 데이터 유입이 끊기고, 끝나도
+  // 다음 이상상황에 대한 LLM이 안 도는" 문제를 사용자가 실측으로 지적(2026-09-20).
+  // 전체 파이프라인(Layer 1~4)이 끊김 없이 계속 돌아야 한다는 요구라, 판단이 나와도
+  // 자동 진행은 그대로 두고 다음 이상감지가 오면 advanceTick()이 알아서 다시 호출한다.
+  // 운영자는 자동 진행 중에도 아무 때나 승인 버튼을 누를 수 있다.
 }
 
 // 승인해도 시나리오는 끝나지 않는다 — 정상으로 돌아간 뒤에도 시뮬레이션은 계속되고,
@@ -422,7 +426,6 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
 // 승인이 시나리오를 영구 종료시키는 1회성 동작이었다).
 function approveAction() {
   pendingApproval = false;
-  stopAuto();
   mode = 'normal';
   tickCount++;
   const tick = recoveryTick(currentTickData || randomStartTick());
