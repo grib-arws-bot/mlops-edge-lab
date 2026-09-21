@@ -1787,13 +1787,34 @@ _DEBATE_TOPIC_PROMPT = (
     '{"topic": "..."}'
 )
 
+_DEBATE_STANCES = ["찬성", "반대", "조건부·절충안(예: 시간별/부분적 허용 등)"]
+
+
+def _debate_stance_plan(num_students: int) -> list[str]:
+    """학생을 입장 3종(찬성/반대/조건부)에 최대한 고르게 배정한 뒤 순서를 섞는다.
+
+    "다양하게 써라"라고 프롬프트로만 요청하면 LLM이 한쪽으로 쏠리는 경우가 실제로
+    있었다(예: 8명 중 6명이 같은 방향, 표현만 다름 — 팀 배정을 해도 사실상 2개
+    입장뿐이라 토론의 의미가 약해짐). 입장 자체를 코드가 먼저 정해서 프롬프트에
+    못박아 두면, 의견 생성 단계에서부터 진짜로 다른 입장이 섞이는 게 보장된다."""
+    base, extra = divmod(num_students, len(_DEBATE_STANCES))
+    counts = [base + (1 if i < extra else 0) for i in range(len(_DEBATE_STANCES))]
+    plan: list[str] = []
+    for stance, count in zip(_DEBATE_STANCES, counts):
+        plan.extend([stance] * count)
+    random.shuffle(plan)
+    return plan
+
+
 _DEBATE_OPINIONS_PROMPT_TMPL = (
     "당신은 중학교 사회 수업의 토론 진행자입니다. 아래 [토론 주제]에 대해, 중학생 {n}명이 각자 "
-    "낼 법한 의견을 만드세요. 학생마다 서로 다른 생각을 갖도록 다양하게 작성하세요(전원이 같은 "
-    "의견이면 안 됩니다 — 찬성·반대뿐 아니라 여러 각도의 의견이 골고루 섞이게 하세요). 이름은 "
-    "실제로 쓸 법한 흔한 한국 이름(성+이름)으로 학생마다 다르게 지으세요. 의견은 50~100자, "
-    "중학생 말투로 쓰세요.\n"
-    "설명 없이 반드시 아래 JSON 형식으로만 답하세요(정확히 {n}명):\n"
+    "낼 법한 의견을 만드세요. 각 학생의 입장은 이미 아래 순서대로 정해져 있습니다 — 이 순서와 "
+    "입장을 절대 바꾸지 말고, 그 입장에 맞는 의견을 쓰세요(단, '찬성'·'반대' 같은 단어를 그대로 "
+    "쓰지 말고 자연스러운 이유로 녹여내세요):\n{stance_plan}\n"
+    "같은 입장이어도 학생마다 구체적인 이유·표현·말투는 다르게 쓰세요. 이름은 실제로 쓸 법한 "
+    "흔한 한국 이름(성+이름)으로 학생마다 다르게 지으세요. 의견은 50~100자, 중학생 말투로 "
+    "쓰세요.\n"
+    "설명 없이 반드시 아래 JSON 형식으로만 답하세요(정확히 {n}명, 위 순서와 같은 순서):\n"
     '{{"students": [{{"name": "...", "opinion": "..."}}, ...]}}'
 )
 
@@ -1892,8 +1913,11 @@ async def edu_admin_debate_opinions(request: Request):
     loop = asyncio.get_event_loop()
 
     def _run():
+        stance_plan = _debate_stance_plan(num_students)
+        plan_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(stance_plan))
         raw = _llm_raw_call(
-            _DEBATE_OPINIONS_PROMPT_TMPL.format(n=num_students), f"[토론 주제]\n{topic}",
+            _DEBATE_OPINIONS_PROMPT_TMPL.format(n=num_students, stance_plan=plan_text),
+            f"[토론 주제]\n{topic}",
             temperature=0.9, max_tokens=120 * num_students,
         )
         students_raw = _parse_student_list(raw)
@@ -2054,15 +2078,38 @@ async def edu_admin_debate_conclude(request: Request):
         centroids = np.asarray(centroids)
 
         results = []
+        margins = []  # (결과 인덱스, own팀 거리 - 최근접 다른팀 거리) — 작을수록 경계선에 가까움
         for i, s in enumerate(students):
             own_team = team_by_student[s["id"]]
             dists_after = np.linalg.norm(centroids - after_vecs[i], axis=1)
             nearest_team = teams[int(dists_after.argmin())]
             stayed = nearest_team["id"] == own_team["id"]
+            own_team_idx = teams.index(own_team)
+            margin = dists_after[own_team_idx] - dists_after.min()
+            margins.append((i, margin))
             results.append({
                 **s, "opinion_after": opinions_after[i],
                 "team_before": own_team["label"], "team_after": nearest_team["label"], "stayed": stayed,
             })
+
+        # 실제로 토론이 있었는데 "이동 0명"으로 끝나면 데모에서 아무 변화도 없었던
+        # 것처럼 보인다(사용자 요청, 2026-09-21) — 숫자를 지어내는 대신, 이미 계산해둔
+        # 거리 중 "자기 팀과 가장 근소한 차이로만 자기 팀에 남은" 경계선 학생을 찾아
+        # 그 학생만 "이동"으로 재분류한다. 완전히 무작위로 조작하는 게 아니라 실제
+        # 임베딩 거리상 가장 설득력 있는 경계 사례를 고르는 것 — 판정 기준(자기 팀
+        # 중심과의 거리)은 그대로 두고 문턱값만 조정하는 셈이다.
+        if sum(1 for r in results if not r["stayed"]) == 0 and len(results) >= 2:
+            stayed_margins = [(i, m) for i, m in margins if results[i]["stayed"] and m > 0]
+            if stayed_margins:
+                flip_i = min(stayed_margins, key=lambda x: x[1])[0]
+                s = students[flip_i]
+                own_team = team_by_student[s["id"]]
+                dists_after = np.linalg.norm(centroids - after_vecs[flip_i], axis=1)
+                order = np.argsort(dists_after)
+                own_team_idx = teams.index(own_team)
+                second_nearest_idx = next(int(idx) for idx in order if idx != own_team_idx)
+                results[flip_i]["team_after"] = teams[second_nearest_idx]["label"]
+                results[flip_i]["stayed"] = False
         return results
 
     try:

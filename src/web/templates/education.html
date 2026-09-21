@@ -9,10 +9,7 @@
     height: calc(100vh - 140px);
   }
   #deck-viewer:fullscreen { height: 100vh; border-radius: 0; }
-  #deck-slide-img { max-width: 100%; max-height: 100%; display: block; user-select: none; }
-  .deck-click-zone { position: absolute; top: 0; bottom: 0; width: 50%; cursor: pointer; }
-  #deck-zone-prev { left: 0; }
-  #deck-zone-next { right: 0; }
+  #deck-slide-img { max-width: 100%; max-height: 100%; display: block; user-select: none; cursor: pointer; }
   #deck-hud {
     position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
     background: rgba(0,0,0,0.55); color: #fff; padding: 5px 14px; border-radius: 20px;
@@ -52,12 +49,13 @@ function deckImgUrl(n) {
 function renderDeckPage() {
   const viewer = document.getElementById('deck-viewer');
   viewer.innerHTML =
-    '<img id="deck-slide-img" src="' + deckImgUrl(deckPage) + '" alt="슬라이드 ' + deckPage + '">' +
-    '<div class="deck-click-zone" id="deck-zone-prev" title="이전 슬라이드"></div>' +
-    '<div class="deck-click-zone" id="deck-zone-next" title="다음 슬라이드"></div>' +
+    '<img id="deck-slide-img" src="' + deckImgUrl(deckPage) + '" alt="슬라이드 ' + deckPage + '" title="클릭하면 다음 슬라이드">' +
     '<div id="deck-hud">' + deckPage + ' / ' + DECK_PAGE_COUNT + '</div>';
-  document.getElementById('deck-zone-prev').addEventListener('click', () => gotoDeckPage(deckPage - 1));
-  document.getElementById('deck-zone-next').addEventListener('click', () => gotoDeckPage(deckPage + 1));
+  // 컨테이너 좌/우 반으로 나눠 클릭을 판정했더니, 세로로 긴 화면에서는 이미지가
+  // 레터박스(양옆 여백)되면서 실제 이미지 경계와 클릭 판정 경계가 어긋나 "이상하게"
+  // 동작했다(사용자 지적, 2026-09-21). 좌우 구분을 없애고 "클릭하면 항상 다음"으로
+  // 단순화 — 되돌아가는 건 휠/키보드/버튼으로 충분하다.
+  document.getElementById('deck-slide-img').addEventListener('click', () => gotoDeckPage(deckPage + 1));
   // 다음 장을 미리 받아둬서 넘길 때 깜빡이지 않게 한다.
   if (deckPage < DECK_PAGE_COUNT) {
     const preload = new Image();
@@ -74,14 +72,27 @@ function gotoDeckPage(n) {
 document.getElementById('deck-prev-btn').addEventListener('click', () => gotoDeckPage(deckPage - 1));
 document.getElementById('deck-next-btn').addEventListener('click', () => gotoDeckPage(deckPage + 1));
 
-// 방향키로도 이동 — 실제 파워포인트 프레젠테이션 조작과 동일하게(사용자 요청,
-// 2026-09-21). 입력창에 포커스가 있을 때는 건드리지 않는다.
+// 방향키·Page Up/Down으로 이동 — 실제 파워포인트 프레젠테이션 조작과 동일하게
+// (사용자 요청, 2026-09-21). 입력창에 포커스가 있을 때는 건드리지 않는다.
 document.addEventListener('keydown', (e) => {
   const tag = (document.activeElement && document.activeElement.tagName) || '';
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-  if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { gotoDeckPage(deckPage + 1); e.preventDefault(); }
-  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { gotoDeckPage(deckPage - 1); e.preventDefault(); }
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown') { gotoDeckPage(deckPage + 1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') { gotoDeckPage(deckPage - 1); e.preventDefault(); }
 });
+
+// 마우스 휠로도 이동(사용자 요청) — 트랙패드 등에서 휠 이벤트가 한 번의 스크롤
+// 동작에도 여러 번 잘게 발생해서, 짧은 쿨다운을 둬서 한 번에 여러 장 넘어가는 걸
+// 막는다.
+let deckWheelCooldown = false;
+document.getElementById('deck-viewer').addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (deckWheelCooldown) return;
+  deckWheelCooldown = true;
+  setTimeout(() => { deckWheelCooldown = false; }, 350);
+  if (e.deltaY > 0) gotoDeckPage(deckPage + 1);
+  else if (e.deltaY < 0) gotoDeckPage(deckPage - 1);
+}, { passive: false });
 
 function requestFullscreenOn(el) {
   const fn = el.requestFullscreen || el.webkitRequestFullscreen;
