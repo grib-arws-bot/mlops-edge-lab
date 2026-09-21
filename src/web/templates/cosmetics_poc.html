@@ -423,17 +423,35 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
 // 운영자는 다시 "악화 시작"을 눌러 새 이상 상황을 만들 수 있다("악화로 간 이후에
 // 운영자 조치를 해도 새로운 데이터가 생성되지 않는다"는 실측 지적, 2026-09-20 — 예전엔
 // 승인이 시나리오를 영구 종료시키는 1회성 동작이었다).
-function approveAction() {
+//
+// 조치 문구는 "이 시나리오(발효 DO 저하)만" 다루므로 방향(교반 RPM 상향 → 산소전달 개선)
+// 자체는 항상 맞지만, 이전엔 그 숫자를 지어내서 고정 문구로 박아뒀었다(사용자 지적:
+// "특정 상황만 정의한 거 아니냐"). Layer 3의 실제 추천값 조회(predict_condition, mock이지만
+// SOP-FMT-01 기준값에서 계산됨)를 그대로 불러와서 쓰도록 2026-09-21 수정 — 새 시나리오가
+// 추가되면 이 하드코딩도 같이 틀어질 여지가 있었던 구조적 문제였다.
+async function approveAction() {
+  let rpmText = '교반 RPM 상향';
+  try {
+    const res = await fetch('/api/cosmetics/predict', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ process: '미생물 발효' }),
+    });
+    const data = await res.json();
+    const rpm = data.recommended_condition && data.recommended_condition.교반RPM;
+    if (rpm) rpmText = `교반 RPM을 ${rpm}으로 상향(${escapeHtml(data.근거_SOP || 'SOP')} 권장치)`;
+  } catch (e) {
+    // 조회 실패해도 승인 자체는 막지 않는다 — 방향성 있는 기본 문구로 대체
+  }
   mode = 'normal';
   tickCount++;
   const tick = recoveryTick(currentTickData || randomStartTick());
   currentTickData = tick;
   abnormalStreak = 0;
-  pushLog(tick, '운영자 승인 → 교반 RPM 상향, DO 회복 확인');
+  pushLog(tick, `운영자 승인 → ${rpmText}, DO 회복 확인`);
   renderStage1(tick);
   renderStage2();
   renderStage3(tick);
-  agentHistory.unshift({ label: '✅ 조치 완료', loading: false, synthetic: true, narrative: '운영자 승인 반영 — 교반 RPM 상향, Layer 1 장비 상태에 반영되었습니다.' });
+  agentHistory.unshift({ label: '✅ 조치 완료', loading: false, synthetic: true, narrative: `운영자 승인 반영 — ${rpmText}, Layer 1 장비 상태에 반영되었습니다.` });
   renderStage4();
 }
 
