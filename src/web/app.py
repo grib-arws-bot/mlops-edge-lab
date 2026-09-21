@@ -1038,7 +1038,12 @@ _control_room_next_due: dict[str, float] = {}
 # 요청마다 프로파일을 넘기는 게 아니라 서버 쪽 전역 설정 하나로 둔다(이 화면을 보는
 # 모두가 같은 조건을 본다) — EDGE_PROFILES는 /simulate와 동일한 것을 재사용.
 _control_room_edge_profile = _DEFAULT_EDGE_PROFILE
-_control_room_auto_enabled = True
+# 2026-09-21 변경: 서버가 켜진 뒤 아무도 안 보고 있어도 루프가 계속 돌아서, 페이지에
+# "처음" 들어와도 이미 여러 틱이 지나 몇몇 카드가 주의/위험 상태로 흘러가 있는 문제가
+# 있었다(사용자 지적 — 스크린샷으로 확인). 기본값을 꺼짐으로 바꿔서, 누군가 명시적으로
+# "자동 재개" 버튼을 눌러야 시작되게 한다 — 그래야 "처음 보는 화면"이 실제로 깨끗한
+# 정상 상태(장비 전부 꺼짐)로 보장된다.
+_control_room_auto_enabled = False
 
 
 def _now_hms() -> str:
