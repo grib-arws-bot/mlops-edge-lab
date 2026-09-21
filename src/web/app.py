@@ -55,6 +55,7 @@ from web.parsing import (
     parse_opinion_list as _parse_opinion_list,
     parse_requirements as _parse_requirements,
     parse_student_list as _parse_student_list,
+    parse_team_label_list as _parse_team_label_list,
     parse_topic_matches as _parse_topic_matches,
     quiz_choice_grounded as _quiz_choice_grounded,
 )
@@ -2018,14 +2019,17 @@ async def edu_admin_debate_teams(request: Request):
             )
             for rank, tid in enumerate(team_ids)
         )
-        label_data = _llm_json_call(
+        # _llm_json_call(엄격한 json.loads)이 아니라 _llm_raw_call + 관대한 파서를
+        # 쓴다 — reason이 자유 문장이라 LLM이 그 안에 콜론·따옴표를 실수로 섞어
+        # JSON을 깨뜨리는 경우가 실제로 있었다(2026-09-21 502 재현·확인).
+        label_raw = _llm_raw_call(
             _DEBATE_TEAM_LABEL_PROMPT_TMPL.format(k=len(team_ids)),
             f"[토론 주제]\n{topic}\n\n[그룹별 샘플 의견]\n{sample_text}",
             temperature=0.3, max_tokens=max(300, 150 * len(team_ids)),
         )
-        groups_meta = label_data.get("groups", [])
+        groups_meta = _parse_team_label_list(label_raw)
         if len(groups_meta) != len(team_ids):
-            groups_meta = [{} for _ in range(len(team_ids))]
+            groups_meta = (groups_meta + [{}] * len(team_ids))[:len(team_ids)]
 
         id_to_name = {s["id"]: s["name"] for s in students}
         teams = []

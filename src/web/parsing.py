@@ -47,6 +47,23 @@ def parse_student_list(raw: str) -> list[dict]:
     return [{"name": m.group(1), "opinion": m.group(2)} for m in pattern.finditer(raw)]
 
 
+def parse_team_label_list(raw: str) -> list[dict]:
+    """{"groups": [{"label":..., "reason":...}, ...]} 배열을 파싱하되, 전체 JSON이
+    깨져도 개별 항목은 정규식으로 복구를 시도한다(parse_student_list와 같은 이유 —
+    2026-09-21 실측 발견: reason이 자유 텍스트라 LLM이 문장 안에 콜론을 실수로 섞어
+    쓰면서 전체 JSON 파싱이 깨졌다. 팀 하나쯤 라벨을 놓쳐도 호출부가 빈 dict로
+    보정하므로, 항목 몇 개 때문에 전체를 재시도시키지 않는다)."""
+    try:
+        data = json.loads(raw)
+        items = data.get("groups", [])
+        if isinstance(items, list) and items:
+            return items
+    except json.JSONDecodeError:
+        pass
+    pattern = re.compile(r'"label"\s*:\s*"([^"]*)"\s*,\s*"reason"\s*:\s*"([^"]*)"')
+    return [{"label": m.group(1), "reason": m.group(2)} for m in pattern.finditer(raw)]
+
+
 def parse_opinion_list(raw: str) -> list[str]:
     """{"students": [{"opinion":...}, ...]} 배열 전용 — parse_student_list와 같은
     이유로 관대하게 복구한다(토론 후 재의견 수집에서도 같은 배열 파싱 위험이 있음)."""
