@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date
@@ -2045,7 +2046,8 @@ async def edu_admin_debate_teams(request: Request):
 
     try:
         teams = await loop.run_in_executor(None, _run)
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError, IndexError):
+        traceback.print_exc()  # 2026-09-21: 원인 불명 502가 실제로 발생 — 로그에 남겨서 다음엔 바로 보이게 함
         return JSONResponse({"error": "팀 구성에 실패했습니다 — 다시 시도해 주세요"}, status_code=502)
 
     return JSONResponse({"teams": teams, "seed": seed})
