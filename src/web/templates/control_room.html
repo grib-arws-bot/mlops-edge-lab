@@ -74,7 +74,7 @@
         <strong>슬롯 {{ i }}</strong>
         <select class="slot-edge-profile">
           {% for key, p in edge_profiles.items() %}
-          <option value="{{ key }}"{% if key == (['server', '2c32g', '2c4g', '4c8g'][i-1]) %} selected{% endif %}>{{ p.label }}</option>
+          <option value="{{ key }}"{% if key == 'server_gpu' %} selected{% endif %}>{{ p.label }}</option>
           {% endfor %}
         </select>
       </div>

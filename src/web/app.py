@@ -615,8 +615,8 @@ async def cosmetics_ask(request: Request):
     # 기존에 이미 빠른 인프로세스 호출로 쓰이고 있었으므로(Layer 4 자유 질의), 프런트가
     # edge_profile을 안 보내는 기존 호출은 그대로 빠르게 동작해야 한다. 느린 에뮬레이션은
     # 시나리오 화면에서 사용자가 명시적으로 프로파일을 고를 때만 켜진다.
-    profile_key = payload.get("edge_profile", "server")
-    profile = EDGE_PROFILES.get(profile_key, EDGE_PROFILES["server"])
+    profile_key = payload.get("edge_profile", "server_gpu")
+    profile = EDGE_PROFILES.get(profile_key, EDGE_PROFILES["server_gpu"])
 
     loop = asyncio.get_event_loop()
 
@@ -666,10 +666,10 @@ EDGE_PROFILES = {
     "4c8g": {"label": "4코어 / 8GB (GPU 없음)", "cores": 4, "mem_gb": 8, "gpu": False},
     "4c8g_gpu": {"label": "4코어 / 8GB + GPU", "cores": 4, "mem_gb": 8, "gpu": True},
 }
-# "서버 기본(제한 없음)"은 이 프로젝트의 개발/운영 서버 자체라 실제 엣지 디바이스로서는
-# 비현실적이다(사용자 지적) — 실제 엣지 배포에서 가장 흔한 스펙으로 꼽히는 4코어/8GB급
-# (산업용 미니PC·NUC급)을 기본 선택지로 삼는다.
-_DEFAULT_EDGE_PROFILE = "4c8g"
+# 2026-09-21: 사용자 요청으로 GPU 서버를 기본값으로 되돌림 — 엣지 제약 시나리오는
+# 각 선택지에서 여전히 고를 수 있지만, 기본으로 보여줄 때는 이 서버가 실제로 가진 GPU를
+# 쓰는 쪽을 우선한다(이전엔 "서버 기본이 비현실적"이라는 이유로 4코어/8GB로 바꿨었음).
+_DEFAULT_EDGE_PROFILE = "server_gpu"
 
 _CATEGORY_SUBSTANCES = {cat: [row[0] for row in table] for cat, (table, _action) in CATEGORIES.items()}
 _CATEGORY_SUBSTANCES_JSON = json.dumps(_CATEGORY_SUBSTANCES, ensure_ascii=False)
@@ -1203,6 +1203,14 @@ async def _control_room_loop() -> None:
             # 처리 성공/실패와 무관하게 다음 차례부터 다시 무작위 간격으로 — 실패했다고
             # 그 현장만 영원히 멈춰있으면 안 된다.
             _control_room_next_due[site] = now + random.uniform(_CONTROL_ROOM_MIN_INTERVAL, _CONTROL_ROOM_MAX_INTERVAL)
+            if not _control_room_auto_enabled:
+                # 한 틱에 여러 현장이 동시에 차례가 되면 이 for문이 LLM 호출을 현장 수만큼
+                # 순차로 돈다(각 수~십여 초) — 그 도중에 사용자가 "자동 중지"를 눌러도
+                # 바깥 while의 체크(위)는 이번 배치가 끝나야 다시 돈다. 2026-09-21 발견
+                # (사용자 지적 — 중지를 눌러도 수동 시뮬레이션이 한동안 계속 막힘): 매
+                # 현장을 처리하기 직전에도 다시 확인해서, 중지 명령이 배치 중간에도 바로
+                # 먹히게 한다.
+                break
             try:
                 substance = random.choice(_CONTROL_ROOM_SITES[site]["substances"])
                 event = _random_event(site, substance)
@@ -1270,7 +1278,15 @@ async def toggle_control_room_auto(request: Request):
     화면" 성격이라 전역으로 적용한다(edge-profile과 동일한 설계)."""
     global _control_room_auto_enabled
     payload = await request.json()
+    was_enabled = _control_room_auto_enabled
     _control_room_auto_enabled = bool(payload.get("enabled", True))
+    if _control_room_auto_enabled and not was_enabled:
+        # 꺼져 있던 동안 모든 현장의 next_due가 과거 시점에 멈춰 있다 — 그대로 두면 켜자마자
+        # 전부 "차례"가 되어 한 틱에 몰아서 처리하다가 그 배치가 끝날 때까지 수동 시뮬레이션이
+        # 계속 막힌다(2026-09-21 발견). 재개 시점부터 다시 무작위로 흩뿌려서 이 몰림을 막는다.
+        now = time.monotonic()
+        for site in _CONTROL_ROOM_SITES:
+            _control_room_next_due[site] = now + random.uniform(_CONTROL_ROOM_MIN_INTERVAL, _CONTROL_ROOM_MAX_INTERVAL)
     return JSONResponse({"status": "ok", "auto_enabled": _control_room_auto_enabled})
 
 
