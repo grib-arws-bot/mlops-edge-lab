@@ -242,6 +242,14 @@ function renderJobStatus(job) {
     trainStatus.textContent = `진행 중 — ${stageLabel}${progressText} (소스: ${(job.sources || []).join(', ')})`;
     trainBtn.disabled = true;
     setTutorLocked(true);
+    // 이 페이지를 "학습 시작" 버튼을 누른 바로 그 세션이 아니라, 이미 학습이 진행
+    // 중일 때 새로 열거나 새로고침한 경우 — pollTimer는 버튼 클릭 핸들러 안에서만
+    // 만들어지므로 이 경로로는 한 번도 안 만들어져 있었다. 그래서 최초 1회(페이지
+    // 로드 시 즉시 실행되는 pollJobStatus())만 상태를 보여주고 그 뒤로는 다시
+    // 갱신되지 않아, "새로고침해야만 학습중/시간 표시가 된다"는 문제가 있었다
+    // (사용자 지적, 2026-09-21). 진행 중임을 알게 된 시점에 폴링이 없으면 여기서
+    // 새로 시작한다.
+    if (!pollTimer) pollTimer = setInterval(pollJobStatus, 3000);
     if (job.started_at_epoch && !trainingStartedAt) {
       // UTC epoch(초)를 그대로 ms로 변환 — 서버 로컬시간 문자열을 브라우저에서
       // 파싱하는 방식은 타임존 어긋남으로 몇 시간씩 오차가 날 수 있어 피했다.

@@ -19,10 +19,18 @@ sample_size=60(toy_sensor_alerts와 동일 규모)으로 "배관이 실제로 �
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import sys
 from pathlib import Path
+
+# finetune_lora.py와 같은 이유·같은 값 — import 전에 설정해야 한다(CUDA 컨텍스트는
+# 한 번 초기화되면 이후 변경이 안 먹힘). 이 값이 없으면 llama.cpp가 기본 split 모드로
+# 보이는 GPU 전부에 레이어를 나눠 올려서, 데이터 생성 단계가 /simulate·/control-room·
+# BidRadar 풀이 쓰는 GPU까지 건드리며 자원을 다툰다(2026-09-21, 사용자 질문 계기로
+# 발견 — finetune_lora.py는 이미 GPU1로 고정해뒀는데 이 단계만 빠져 있었음).
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
 
 from llama_cpp import Llama
 

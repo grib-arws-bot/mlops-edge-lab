@@ -446,7 +446,10 @@ async function runSlot(slot) {
       showError('서버가 예상과 다른 형태로 응답했습니다: ' + JSON.stringify(narrateData).slice(0, 300));
       return;
     }
-    renderEquipmentInto(slot, narrateData.equipment);
+    // 최종 결과 카드(runCardHtml)가 장비 상태를 이미 포함하므로, ①단계에서 보여줬던
+    // 미리보기 박스는 여기서 숨긴다 — 안 그러면 같은 장비 목록이 위(미리보기)·아래
+    // (결과 카드)에 두 번 보인다(사용자 지적, 2026-09-21).
+    slot.querySelector('.slot-equipment').style.display = 'none';
     renderSlotResult(slot, narrateData);
   } finally {
     setAllSlotButtonsDisabled(false);
