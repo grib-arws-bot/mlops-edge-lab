@@ -52,7 +52,14 @@ def parse_team_label_list(raw: str) -> list[dict]:
     깨져도 개별 항목은 정규식으로 복구를 시도한다(parse_student_list와 같은 이유 —
     2026-09-21 실측 발견: reason이 자유 텍스트라 LLM이 문장 안에 콜론을 실수로 섞어
     쓰면서 전체 JSON 파싱이 깨졌다. 팀 하나쯤 라벨을 놓쳐도 호출부가 빈 dict로
-    보정하므로, 항목 몇 개 때문에 전체를 재시도시키지 않는다)."""
+    보정하므로, 항목 몇 개 때문에 전체를 재시도시키지 않는다).
+
+    콜론(:) 자체를 정규식 필수로 요구했더니 실제로 3번 연속 같은 패턴의 실패를
+    겪었다(2026-09-21 재실측, 실제 원문 로그로 확인) — LLM이 배열의 "마지막"
+    항목에서만 유독 "reason" 키의 닫는 따옴표와 값의 여는 따옴표 사이 구분자를
+    깨뜨렸는데, `"reason "...`(공백만) · `"reason="...`(등호가 닫는 따옴표 자리를
+    대신 차지) 두 가지 형태가 섞여 나왔다. "reason" 뒤의 따옴표·콜론·등호·공백을
+    전부 선택적 잡음으로 보고 건너뛰어서 두 형태 다 복구되게 한다."""
     try:
         data = json.loads(raw)
         items = data.get("groups", [])
@@ -60,7 +67,7 @@ def parse_team_label_list(raw: str) -> list[dict]:
             return items
     except json.JSONDecodeError:
         pass
-    pattern = re.compile(r'"label"\s*:\s*"([^"]*)"\s*,\s*"reason"\s*:\s*"([^"]*)"')
+    pattern = re.compile(r'"label"\s*[:=]?\s*"([^"]*)"\s*,\s*"?reason"?[:="\s]*([^"]*)"')
     return [{"label": m.group(1), "reason": m.group(2)} for m in pattern.finditer(raw)]
 
 
