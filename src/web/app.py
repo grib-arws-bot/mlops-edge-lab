@@ -62,7 +62,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
 _F16_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-f16.gguf"
 _HERE = Path(__file__).resolve().parent
-_DECK_PPTX = _ROOT / "docs" / "교육자료" / "MLOps-Edge-Lab_교육자료_v3.pptx"
+_DECK_PPTX = _ROOT / "docs" / "교육자료" / "MLOps-Edge-Lab_교육자료_v4.pptx"
 _STATIC_DIR = _HERE / "static"
 _DECK_PDF = _STATIC_DIR / "deck.pdf"
 _STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,13 +70,24 @@ _STATIC_DIR.mkdir(parents=True, exist_ok=True)
 _state: dict = {}
 
 
+_DECK_PAGES_DIR = _STATIC_DIR / "deck_pages"
+_DECK_MANIFEST = _DECK_PAGES_DIR / "manifest.json"
+
+
 def _ensure_deck_pdf() -> None:
-    """교육자료 PPT를 PDF로 변환해 웹에 그대로 박아 넣는다.
+    """교육자료 PPT를 PDF로, 그리고 페이지별 PNG로 변환해 웹에 그대로 박아 넣는다.
 
     파일을 미리 변환해서 커밋해두지 않는 이유는 파이프라인 페이지 수치와 같은 원칙 —
     "화면에 보이는 것은 항상 실제 산출물에서 나온다"를 지키기 위함이다. pptx가 갱신되면
     (mtime 비교) 다음 서버 기동 때 자동으로 다시 변환된다. LibreOffice(soffice)는 PPT
     검증 단계에서 이미 서버에 설치돼 있던 걸 재사용.
+
+    **페이지별 PNG를 따로 만드는 이유(2026-09-21, 사용자 요청)**: 브라우저 내장 PDF
+    뷰어(<embed>)는 자체 썸네일 사이드바·툴바를 갖고 있어서 "전체화면 버튼을 눌러도
+    실제 파워포인트 프레젠테이션처럼" 한 장씩 꽉 채워 보여줄 수가 없다 — 그 UI는
+    브라우저 플러그인이 그리는 것이라 CSS/JS로 제어가 안 된다. 그래서 PDF 자체를
+    보여주는 대신, 페이지마다 이미지로 미리 렌더링해두고 프런트에서 직접 슬라이드쇼
+    뷰어(이미지 1장 + 좌우 이동 + 전체화면)를 구현한다.
     """
     if not _DECK_PPTX.exists():
         return
@@ -89,6 +100,19 @@ def _ensure_deck_pdf() -> None:
         )
         produced = next(Path(tmp).glob("*.pdf"))
         produced.replace(_DECK_PDF)
+
+    import pymupdf
+
+    _DECK_PAGES_DIR.mkdir(parents=True, exist_ok=True)
+    for old in _DECK_PAGES_DIR.glob("page_*.png"):
+        old.unlink()
+    doc = pymupdf.open(str(_DECK_PDF))
+    for i, page in enumerate(doc, start=1):
+        # dpi=140 — 풀스크린 프로젝터/모니터에서도 흐려 보이지 않을 해상도와 파일
+        # 크기(페이지당 수백 KB)의 절충점. 실측 없이 고른 값이라 흐릿하면 올릴 것.
+        pix = page.get_pixmap(dpi=140)
+        pix.save(str(_DECK_PAGES_DIR / f"page_{i:03d}.png"))
+    _DECK_MANIFEST.write_text(json.dumps({"page_count": len(doc)}), encoding="utf-8")
 
 
 def _load_gpu_llm_or_disable_gpu_profiles() -> None:
@@ -483,7 +507,16 @@ def index(request: Request):
 
 @app.get("/education", response_class=HTMLResponse)
 def education(request: Request):
-    return templates.TemplateResponse(request, "education.html", {"deck_available": _DECK_PDF.exists()})
+    page_count = 0
+    if _DECK_MANIFEST.exists():
+        try:
+            page_count = json.loads(_DECK_MANIFEST.read_text(encoding="utf-8")).get("page_count", 0)
+        except json.JSONDecodeError:
+            page_count = 0
+    return templates.TemplateResponse(
+        request, "education.html",
+        {"deck_available": _DECK_PDF.exists() and page_count > 0, "page_count": page_count},
+    )
 
 
 _RAG_GOLDEN_SET_PATH = _ROOT / "data" / "processed" / "rag_golden_set.jsonl"

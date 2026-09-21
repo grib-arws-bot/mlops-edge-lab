@@ -2,47 +2,96 @@
 {% block title %}교육 자료 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
 {% if deck_available %}
-<div id="deck-container"><div class="card">교육 자료 불러오는 중...</div></div>
+<style>
+  #deck-viewer {
+    position: relative; width: 100%; background: #0a0a0a; border-radius: 10px;
+    overflow: hidden; display: flex; align-items: center; justify-content: center;
+    height: calc(100vh - 140px);
+  }
+  #deck-viewer:fullscreen { height: 100vh; border-radius: 0; }
+  #deck-slide-img { max-width: 100%; max-height: 100%; display: block; user-select: none; }
+  .deck-click-zone { position: absolute; top: 0; bottom: 0; width: 50%; cursor: pointer; }
+  #deck-zone-prev { left: 0; }
+  #deck-zone-next { right: 0; }
+  #deck-hud {
+    position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.55); color: #fff; padding: 5px 14px; border-radius: 20px;
+    font-size: 0.82rem; display: flex; align-items: center; gap: 12px; pointer-events: none;
+  }
+  #deck-toolbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-bottom: 8px;
+  }
+  #deck-toolbar button {
+    margin-top: 0; padding: 6px 14px; font-size: 0.85rem;
+  }
+  .deck-nav-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .deck-nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+
+<div id="deck-toolbar">
+  <div style="display:flex; gap:6px;">
+    <button type="button" id="deck-prev-btn" class="deck-nav-btn">◀ 이전</button>
+    <button type="button" id="deck-next-btn" class="deck-nav-btn">다음 ▶</button>
+  </div>
+  <button type="button" id="deck-fullscreen-btn">⛶ 전체화면으로 보기</button>
+</div>
+
+<div id="deck-viewer">
+  <div class="stat" style="color:#888;">불러오는 중...</div>
+</div>
+
 <script>
-// 사내망 프록시가 가끔 요청을 퍼센트인코딩된 절대경로로 변조해 404를 내는 문제가
-// 실제로 관측됨(docs/의사결정_로그.md 42번, 57번) — 단순 <embed src="..."> 태그는
-// 이 실패를 감지·재시도할 방법이 없어서, fetch로 직접 받아 성공(status 200)했을 때만
-// blob URL로 임베딩하고, 실패하면 잠깐 쉬었다가 재시도한다.
-// 전체화면 버튼 — embed(브라우저 내장 PDF 뷰어) 자체를 Fullscreen API로 채운다.
-// PDF.js 툴바(페이지 이동·확대 등)는 그대로 남아있지만, 페이지 헤더·네비게이션 같은
-// 바깥 여백이 사라져서 실제 발표 화면처럼 꽉 채워 보여줄 수 있다(사용자 요청,
-// 2026-09-21). Safari는 webkit 접두사가 필요해서 같이 처리해둔다.
+const DECK_PAGE_COUNT = {{ page_count }};
+let deckPage = 1;
+
+function deckImgUrl(n) {
+  return '/static/deck_pages/page_' + String(n).padStart(3, '0') + '.png';
+}
+
+function renderDeckPage() {
+  const viewer = document.getElementById('deck-viewer');
+  viewer.innerHTML =
+    '<img id="deck-slide-img" src="' + deckImgUrl(deckPage) + '" alt="슬라이드 ' + deckPage + '">' +
+    '<div class="deck-click-zone" id="deck-zone-prev" title="이전 슬라이드"></div>' +
+    '<div class="deck-click-zone" id="deck-zone-next" title="다음 슬라이드"></div>' +
+    '<div id="deck-hud">' + deckPage + ' / ' + DECK_PAGE_COUNT + '</div>';
+  document.getElementById('deck-zone-prev').addEventListener('click', () => gotoDeckPage(deckPage - 1));
+  document.getElementById('deck-zone-next').addEventListener('click', () => gotoDeckPage(deckPage + 1));
+  // 다음 장을 미리 받아둬서 넘길 때 깜빡이지 않게 한다.
+  if (deckPage < DECK_PAGE_COUNT) {
+    const preload = new Image();
+    preload.src = deckImgUrl(deckPage + 1);
+  }
+}
+
+function gotoDeckPage(n) {
+  if (n < 1 || n > DECK_PAGE_COUNT) return;
+  deckPage = n;
+  renderDeckPage();
+}
+
+document.getElementById('deck-prev-btn').addEventListener('click', () => gotoDeckPage(deckPage - 1));
+document.getElementById('deck-next-btn').addEventListener('click', () => gotoDeckPage(deckPage + 1));
+
+// 방향키로도 이동 — 실제 파워포인트 프레젠테이션 조작과 동일하게(사용자 요청,
+// 2026-09-21). 입력창에 포커스가 있을 때는 건드리지 않는다.
+document.addEventListener('keydown', (e) => {
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { gotoDeckPage(deckPage + 1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { gotoDeckPage(deckPage - 1); e.preventDefault(); }
+});
+
 function requestFullscreenOn(el) {
   const fn = el.requestFullscreen || el.webkitRequestFullscreen;
   if (fn) fn.call(el);
 }
+document.getElementById('deck-fullscreen-btn').addEventListener('click', () => {
+  requestFullscreenOn(document.getElementById('deck-viewer'));
+});
 
-async function loadDeck(retries = 3) {
-  const container = document.getElementById('deck-container');
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const resp = await fetch('/static/deck.pdf', { cache: 'no-store' });
-      if (resp.ok) {
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        container.innerHTML =
-          '<div style="display:flex; justify-content:flex-end; margin-bottom:8px;">' +
-            '<button type="button" id="deck-fullscreen-btn">⛶ 전체화면으로 보기</button>' +
-          '</div>' +
-          '<embed id="deck-embed" src="' + url + '" type="application/pdf" style="width: 100%; height: calc(100vh - 96px); border: 0; border-radius: 10px; display: block;">';
-        document.getElementById('deck-fullscreen-btn').addEventListener('click', () => {
-          requestFullscreenOn(document.getElementById('deck-embed'));
-        });
-        return;
-      }
-    } catch (e) {
-      // 네트워크 오류 — 아래에서 재시도
-    }
-    if (attempt < retries) await new Promise(r => setTimeout(r, 700));
-  }
-  container.innerHTML = '<div class="card">교육 자료를 불러오지 못했습니다(사내망 프록시로 인한 일시적 오류일 수 있습니다). <a href="javascript:location.reload()">새로고침해서 다시 시도</a>해주세요.</div>';
-}
-loadDeck();
+renderDeckPage();
 </script>
 {% else %}
 <div class="card">교육 자료가 아직 준비되지 않았습니다. <code>docs/교육자료/MLOps-Edge-Lab_교육자료.pptx</code>를 확인해 주세요.</div>
