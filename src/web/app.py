@@ -1922,24 +1922,35 @@ async def edu_admin_debate_opinions(request: Request):
     loop = asyncio.get_event_loop()
 
     def _run():
-        # 요청한 인원수(예: 10명)보다 적게 파싱되는 경우가 실제로 있었다(2026-09-21
-        # 사용자 실측: 10명 요청 → 9명만 나옴) — JSON 마지막 항목이 토큰 한도 근처에서
-        # 잘리거나 LLM이 개수를 놓치는 경우. 한 번에 포기하지 않고 최대 2회까지
-        # 재시도해서, 그중 가장 많이 확보한 결과를 쓴다.
-        students_raw: list[dict] = []
+        stance_plan = _debate_stance_plan(num_students)
+        plan_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(stance_plan))
+        raw = _llm_raw_call(
+            _DEBATE_OPINIONS_PROMPT_TMPL.format(n=num_students, stance_plan=plan_text),
+            f"[토론 주제]\n{topic}",
+            temperature=0.9, max_tokens=140 * num_students,
+        )
+        students_raw = _parse_student_list(raw)
+
+        # 요청한 인원수(예: 10명)보다 적게 나오는 경우가 실제로 있었다(2026-09-21
+        # 실측: 10명 요청 → 매번 마지막 1명이 빠진 채 9명만 생성됨) — 처음부터 통째로
+        # 다시 시키면 같은 실패가 그대로 반복될 뿐이라(재시도해도 9명이 또 나옴,
+        # 실측 확인), 모자란 만큼만 짧게 추가로 요청한다. 이미 배정해둔 입장 계획의
+        # 뒷부분(아직 안 쓰인 것으로 추정되는 구간)을 그대로 이어서 쓴다 — 작은
+        # 요청일수록 LLM이 개수를 안 놓친다.
         for _attempt in range(2):
-            stance_plan = _debate_stance_plan(num_students)
-            plan_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(stance_plan))
-            raw = _llm_raw_call(
-                _DEBATE_OPINIONS_PROMPT_TMPL.format(n=num_students, stance_plan=plan_text),
-                f"[토론 주제]\n{topic}",
-                temperature=0.9, max_tokens=140 * num_students,
-            )
-            parsed = _parse_student_list(raw)
-            if len(parsed) > len(students_raw):
-                students_raw = parsed
-            if len(students_raw) >= num_students:
+            deficit = num_students - len(students_raw)
+            if deficit <= 0:
                 break
+            remaining_plan = stance_plan[-deficit:]
+            extra_plan_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(remaining_plan))
+            extra_raw = _llm_raw_call(
+                _DEBATE_OPINIONS_PROMPT_TMPL.format(n=len(remaining_plan), stance_plan=extra_plan_text),
+                f"[토론 주제]\n{topic}",
+                temperature=0.9, max_tokens=140 * len(remaining_plan),
+            )
+            students_raw = students_raw + _parse_student_list(extra_raw)
+        students_raw = students_raw[:num_students]
+
         if len(students_raw) < 2:
             raise ValueError("학생 의견 생성 실패")
         # 이름이 비었거나 중복되면 코드가 안전하게 보정 — LLM이 가짜 이름을 잘 못
