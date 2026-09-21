@@ -8,6 +8,15 @@
 // 실제로 관측됨(docs/의사결정_로그.md 42번, 57번) — 단순 <embed src="..."> 태그는
 // 이 실패를 감지·재시도할 방법이 없어서, fetch로 직접 받아 성공(status 200)했을 때만
 // blob URL로 임베딩하고, 실패하면 잠깐 쉬었다가 재시도한다.
+// 전체화면 버튼 — embed(브라우저 내장 PDF 뷰어) 자체를 Fullscreen API로 채운다.
+// PDF.js 툴바(페이지 이동·확대 등)는 그대로 남아있지만, 페이지 헤더·네비게이션 같은
+// 바깥 여백이 사라져서 실제 발표 화면처럼 꽉 채워 보여줄 수 있다(사용자 요청,
+// 2026-09-21). Safari는 webkit 접두사가 필요해서 같이 처리해둔다.
+function requestFullscreenOn(el) {
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (fn) fn.call(el);
+}
+
 async function loadDeck(retries = 3) {
   const container = document.getElementById('deck-container');
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -16,7 +25,14 @@ async function loadDeck(retries = 3) {
       if (resp.ok) {
         const blob = await resp.blob();
         const url = URL.createObjectURL(blob);
-        container.innerHTML = '<embed src="' + url + '" type="application/pdf" style="width: 100%; height: calc(100vh - 96px); border: 0; border-radius: 10px; display: block;">';
+        container.innerHTML =
+          '<div style="display:flex; justify-content:flex-end; margin-bottom:8px;">' +
+            '<button type="button" id="deck-fullscreen-btn">⛶ 전체화면으로 보기</button>' +
+          '</div>' +
+          '<embed id="deck-embed" src="' + url + '" type="application/pdf" style="width: 100%; height: calc(100vh - 96px); border: 0; border-radius: 10px; display: block;">';
+        document.getElementById('deck-fullscreen-btn').addEventListener('click', () => {
+          requestFullscreenOn(document.getElementById('deck-embed'));
+        });
         return;
       }
     } catch (e) {
