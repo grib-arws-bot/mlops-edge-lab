@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent import cosmetics_tools, rules
 from agent.cosmetics_run import run_cosmetics_agent
 from agent.cosmetics_tools import CosmeticsToolContext
-from agent.run import preview, run_agent, run_agent_composite, to_dict, to_dict_composite
+from agent.run import judge_and_actuate, narrate, preview, run_agent, run_agent_composite, to_dict, to_dict_composite
 from agent.tools import ToolContext
 from collect import registry as collect_registry
 from collect.storage import collection_summary
@@ -1023,9 +1023,17 @@ _CONTROL_ROOM_SITES = {
     "2층 사무실": {"category": "공기질", "substances": ["CO2", "TVOC"]},
     "체육관": {"category": "공기질", "substances": ["CO2", "습도"]},
 }
-_CONTROL_ROOM_INTERVAL_SECONDS = 12
+# 2026-09-21 변경: 모든 현장이 하나의 공유 12초 틱에 맞춰 순서대로 갱신되던 걸(한 틱에
+# 무작위 현장 하나만 골라 갱신), 현장마다 독립적인 무작위 주기로 바꿨다(사용자 요청 —
+# "각 카드의 데이터 수집 시간이 불규칙적으로 들어오게"). 루프 자체는 1초마다 깨어나
+# "지금 차례가 된 현장이 있는지"만 확인하고, 차례가 된 현장은 다음 차례를 다시 무작위로
+# 뽑는다 — 실제 센서들이 서로 동기화되지 않고 각자 따로 보고하는 것과 비슷한 모양이 된다.
+_CONTROL_ROOM_TICK_SECONDS = 1
+_CONTROL_ROOM_MIN_INTERVAL = 8
+_CONTROL_ROOM_MAX_INTERVAL = 25
 
 _control_room_state: dict[str, dict] = {}
+_control_room_next_due: dict[str, float] = {}
 # /simulate와 달리 통합관제는 여러 사람이 같이 보는 "관제실 화면 하나"라는 컨셉이라,
 # 요청마다 프로파일을 넘기는 게 아니라 서버 쪽 전역 설정 하나로 둔다(이 화면을 보는
 # 모두가 같은 조건을 본다) — EDGE_PROFILES는 /simulate와 동일한 것을 재사용.
@@ -1051,9 +1059,28 @@ def _random_event(site: str, substance: str) -> dict:
     }
 
 
+def _baseline_alert(category: str) -> dict:
+    """장비가 하나도 안 켜진 "정상" 기본 상태 — 서버가 막 켜졌을 때, 그리고 알림이
+    정상으로 돌아왔을 때 둘 다 이 상태로 보여준다(사용자 요청, 2026-09-21 — "최초에는
+    모든 장비가 정상인 상태에서 시작"). 이전엔 alert=None이면 카드에서 장비 영역
+    자체가 안 보였는데, 그러면 "이 현장에 어떤 장비가 있는지"조차 알 수 없었다 —
+    이제는 항상 장비 목록을 보여주되 전부 "꺼짐"으로 표시한다."""
+    return {
+        "substance": None, "severity": "정상", "narrative": None,
+        "equipment": [{"equipment": name, "status": "꺼짐"} for name in rules.equipment_for_category(category)],
+        "logged_at": None, "sensor_changed_at": None, "elapsed": None,
+        "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])["label"],
+        "pending": False,
+    }
+
+
 def _init_control_room() -> None:
     """서버 기동 시 각 현장의 모든 센서를 정상 상태 기본값으로 채워둔다 — 첫 폴링 전에도
-    화면이 비어있지 않게 하기 위함. 알림(alert)은 처음엔 당연히 없음(None)."""
+    화면이 비어있지 않게 하기 위함. 알림(alert)도 "장비 전부 꺼짐"인 정상 기본 상태로
+    시작한다(빈 화면이 아니라 명시적으로 정상임을 보여줌). 각 현장의 다음 갱신 시각도
+    0~MAX_INTERVAL 사이로 흩뿌려서(stagger) 서버가 막 켜졌을 때 모든 카드가 동시에
+    갱신되는 걸 방지한다."""
+    now = time.monotonic()
     for site, spec in _CONTROL_ROOM_SITES.items():
         sensors = {}
         for substance in spec["substances"]:
@@ -1062,21 +1089,23 @@ def _init_control_room() -> None:
                 "value": _value_for_ratio(substance, threshold, SEVERITY_RATIO["정상"]), "threshold": threshold,
                 "unit": unit, "severity": "정상", "updated_at": _now_hms(),
             }
-        _control_room_state[site] = {"sensors": sensors, "alert": None}
+        _control_room_state[site] = {"sensors": sensors, "alert": _baseline_alert(spec["category"])}
+        _control_room_next_due[site] = now + random.uniform(0, _CONTROL_ROOM_MAX_INTERVAL)
 
 
-def _update_sensor(site: str, substance: str, event: dict, preview_result: dict) -> None:
+def _update_sensor(site: str, substance: str, event: dict, severity: str) -> None:
     _control_room_state[site]["sensors"][substance] = {
         "value": event["value"], "threshold": event["threshold"], "unit": event["unit"],
-        "severity": preview_result["judgement"]["severity"], "updated_at": _now_hms(),
+        "severity": severity, "updated_at": _now_hms(),
     }
 
 
-def _run_control_room_narrative(event: dict) -> dict:
-    """백그라운드 스레드(run_in_executor)에서 호출됨 — asyncio 이벤트 루프를 LLM 추론
-    시간(수 초) 동안 막지 않기 위해 별도 스레드로 뺐다. 선택된 엣지 프로파일이 서버
-    기본이면 인프로세스 모델을(_llm_lock으로 /api/narrate와 직렬화), 아니면 /simulate와
-    동일한 cgroup 에뮬레이션(_run_events_emulated)을 그대로 재사용한다."""
+def _run_control_room_narration(event: dict, judgement, equipment_status: list[dict]) -> dict:
+    """백그라운드 스레드(run_in_executor)에서 호출됨 — LLM 서술만 담당한다. 장비 제어는
+    이 함수가 불리기 전에 메인 이벤트 루프에서 이미 동기적으로 끝나 있다(judge_and_actuate,
+    2026-09-21 변경 — 사용자 요청: "장비 제어는 즉시 처리되어야 한다"). 선택된 엣지
+    프로파일이 서버 기본이면 인프로세스 모델을(_llm_lock으로 /api/narrate와 직렬화), 아니면
+    /simulate와 동일한 cgroup 에뮬레이션(_run_events_emulated)을 그대로 재사용한다."""
     global _gpu_llm_busy
     profile = EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])
     if profile["cores"] is None:
@@ -1086,20 +1115,26 @@ def _run_control_room_narrative(event: dict) -> dict:
             if is_gpu:
                 _gpu_llm_busy = True
             try:
-                result = run_agent(event, _state["ctx"], llm)
+                result = narrate(event, judgement, equipment_status, _state["ctx"], llm)
                 _state["ctx"].notify_log.clear()
-                return to_dict(result)
+                return result
             finally:
                 if is_gpu:
                     _gpu_llm_busy = False
-    return _run_events_emulated([event], profile["cores"], profile["mem_gb"], profile.get("gpu", False))[0]
+    # 에뮬레이션 경로는 격리된 서브프로세스(agent/run_cli.py)라 메인 프로세스가 이미 실행한
+    # judge_and_actuate 결과를 넘겨줄 수 없다 — 서브프로세스가 판정·장비제어를 자체적으로
+    # 다시 수행한다(둘 다 시뮬레이션이라 실제 부작용은 없음, 로그에 중복 기록만 남을 뿐).
+    # 화면에는 메인 프로세스에서 이미 실행한 진짜(먼저 실행된) equipment_status를 그대로
+    # 쓰고, 여기서는 narrative만 가져다 쓴다.
+    emulated = _run_events_emulated([event], profile["cores"], profile["mem_gb"], profile.get("gpu", False))[0]
+    return {"narrative": emulated["narrative"], "tool_trace": emulated.get("tool_trace", []), "report": emulated.get("report")}
 
 
 def _set_site_alert_pending(site: str, substance: str, severity: str, equipment_status: list[dict], sensor_changed_at: str) -> None:
-    """LLM 응답을 기다리는 동안 먼저 보여줄 상태(사용자 요청, 2026-09-19 — /simulate처럼
-    단계별로 보이게). preview()의 equipment_status는 실제 tools.actuate_equipment를 부르지
-    않는 순수 미리보기라 부작용이 없다(/simulate의 "①즉시 반응"과 같은 패턴) — 실제 실행
-    기록은 이후 _set_site_alert가 run_agent 결과로 덮어쓴다."""
+    """장비 제어는 이미 실제로 끝난 뒤 호출된다(judge_and_actuate가 이벤트 루프에서 동기
+    실행됨, 2026-09-21) — 여기 들어오는 equipment_status는 더 이상 미리보기가 아니라
+    tools.actuate_equipment가 실제로 남긴 기록이다. LLM 서술만 아직 없어서(narrative=None)
+    "pending"으로 표시하고, 완성되면 _set_site_alert가 narrative만 채운다."""
     _control_room_state[site]["alert"] = {
         "substance": substance, "severity": severity, "narrative": None,
         "equipment": equipment_status, "logged_at": None,
@@ -1109,13 +1144,18 @@ def _set_site_alert_pending(site: str, substance: str, severity: str, equipment_
     }
 
 
-def _set_site_alert(site: str, substance: str, severity: str, result: dict, elapsed: float, sensor_changed_at: str) -> None:
+def _set_site_alert(
+    site: str, substance: str, severity: str, narration: dict, equipment_status: list[dict],
+    elapsed: float, sensor_changed_at: str,
+) -> None:
     """단계별 타임스탬프(사용자 요청, 의사결정_로그 61번)를 전부 남긴다 — 센서 변경 시점은
     여기서 직접 넘겨받고, 장비 조치 시점은 각 equipment_status 항목이 이미 갖고 있는
-    ISO 'at' 필드에서, LLM 완성 시점은 지금(logged_at)으로 기록한다."""
+    ISO 'at' 필드에서, LLM 완성 시점은 지금(logged_at)으로 기록한다. equipment_status는
+    _set_site_alert_pending 때 이미 실제로 실행된 값을 그대로 재사용한다(narration이
+    새로 정하지 않음)."""
     _control_room_state[site]["alert"] = {
-        "substance": substance, "severity": severity, "narrative": result["narrative"],
-        "equipment": result.get("equipment_status", []), "logged_at": _now_hms(),
+        "substance": substance, "severity": severity, "narrative": narration["narrative"],
+        "equipment": equipment_status, "logged_at": _now_hms(),
         "sensor_changed_at": sensor_changed_at,
         "elapsed": elapsed, "edge_label": EDGE_PROFILES.get(_control_room_edge_profile, EDGE_PROFILES[_DEFAULT_EDGE_PROFILE])["label"],
         "pending": False,
@@ -1123,61 +1163,77 @@ def _set_site_alert(site: str, substance: str, severity: str, result: dict, elap
 
 
 def _clear_site_alert_if_owner(site: str, substance: str) -> None:
-    """지금 켜진 알림이 '이 센서' 때문에 켜진 게 맞을 때만 끈다 — 다른 센서가 원인인
-    알림까지 같이 꺼버리는 걸 방지."""
+    """지금 켜진 알림이 '이 센서' 때문에 켜진 게 맞을 때만 정상 기본 상태(장비 전부
+    꺼짐)로 되돌린다 — 다른 센서가 원인인 알림까지 같이 꺼버리는 걸 방지. None으로
+    지우던 걸 _baseline_alert로 바꿨다(2026-09-21) — 정상으로 돌아왔을 때도 카드에
+    "장비가 전부 꺼진 정상 상태"가 계속 보여야 하기 때문."""
     alert = _control_room_state[site]["alert"]
     if alert and alert["substance"] == substance:
-        _control_room_state[site]["alert"] = None
+        category = _CONTROL_ROOM_SITES[site]["category"]
+        _control_room_state[site]["alert"] = _baseline_alert(category)
 
 
 async def _control_room_loop() -> None:
-    """12초마다 무작위 현장의 무작위 센서 하나를 골라 실제 규칙 판정을 다시 계산하고,
-    주의/위험이면 LLM까지 돌려 그 현장 카드의 알림으로 반영한다. 정상으로 돌아오면(그
+    """1초마다 깨어나 "다음 갱신 시각이 지난 현장"이 있는지 확인한다(2026-09-21 변경 —
+    이전엔 12초마다 무작위 현장 하나만 골랐는데, 사용자 요청으로 현장마다 독립적인 무작위
+    주기(8~25초)를 갖도록 바꿨다 — 카드들이 서로 동기화되지 않고 각자 따로 보고하는 모양).
+    차례가 된 현장은 실제 규칙 판정 + 장비 제어를 그 자리에서(이벤트 루프에서 동기적으로)
+    즉시 실행한다 — 장비 제어가 LLM 응답을 기다리지 않아야 한다는 원칙(사용자 요청). 주의/
+    위험이면 그 뒤에 LLM 서술만 별도 스레드로 돌려 카드에 반영한다. 정상으로 돌아오면(그
     알림을 유발한 센서일 때만) 알림을 지운다. 백그라운드 태스크가 예외로 죽으면 그 뒤로
-    통합관제 페이지가 영원히 멈춰버리므로, 매 틱을 try/except로 감싸 하나 실패해도 다음
-    틱은 계속되게 한다."""
+    통합관제 페이지가 영원히 멈춰버리므로, 현장 하나의 실패가 다른 현장에 번지지 않게
+    현장별로 try/except를 건다."""
     loop = asyncio.get_event_loop()
     while True:
-        await asyncio.sleep(_CONTROL_ROOM_INTERVAL_SECONDS)
+        await asyncio.sleep(_CONTROL_ROOM_TICK_SECONDS)
         if not _control_room_auto_enabled:
             # 사용자가 명시적으로 중지시켰다(2026-09-19 요청) — 상호배제 플래그만으로는
-            # 12초 틱이 계속 재시도해서 수동 시뮬레이션이 반복적으로 거절될 수 있어,
-            # 아예 이번 루프를 완전히 쉬게 하는 명시적 on/off 스위치를 추가했다.
+            # 틱이 계속 재시도해서 수동 시뮬레이션이 반복적으로 거절될 수 있어, 아예 이번
+            # 루프를 완전히 쉬게 하는 명시적 on/off 스위치를 추가했다.
             continue
-        try:
-            site = random.choice(list(_CONTROL_ROOM_SITES))
-            substance = random.choice(_CONTROL_ROOM_SITES[site]["substances"])
-            event = _random_event(site, substance)
-            preview_result = preview(event)
-            severity = preview_result["judgement"]["severity"]
-            sensor_changed_at = _now_hms()
-            _update_sensor(site, substance, event, preview_result)
-            METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=severity).inc()
 
-            if severity != "정상":
-                # 수동 시뮬레이션이 지금 CPU 코어를 점유 중이면 이번 틱은 건너뛴다
-                # (사용자 요청, 2026-09-19) — 자동 루프와 수동 시뮬레이션이 같은 cgroup
-                # 코어를 동시에 쓰면 서로 느려져 수동 쪽이 타임아웃까지 걸렸다. 12초
-                # 뒤 다음 틱에서 다시 시도하면 되므로 이번 틱은 조용히 넘어간다.
-                if _simulation_in_progress:
-                    continue
-                # 규칙(장비 조치)은 즉시 보여주고, LLM 문구는 나중에 채운다(사용자 요청,
-                # /simulate의 단계별 표시와 동일한 원칙 — "판정은 즉시, LLM은 나중"이라는
-                # 이 프로젝트 전체의 설계를 카드 화면에서도 실제로 보이게 함).
-                _set_site_alert_pending(site, substance, severity, preview_result["equipment_status"], sensor_changed_at)
-                global _auto_tick_in_progress
-                _auto_tick_in_progress = True
-                try:
-                    start = time.perf_counter()
-                    result = await loop.run_in_executor(None, _run_control_room_narrative, event)
-                    elapsed = round(time.perf_counter() - start, 2)
-                finally:
-                    _auto_tick_in_progress = False
-                _set_site_alert(site, substance, severity, result, elapsed, sensor_changed_at)
-            else:
-                _clear_site_alert_if_owner(site, substance)
-        except Exception as exc:  # noqa: BLE001 — 백그라운드 루프는 절대 죽으면 안 됨
-            print(f"[control-room] tick 실패: {exc}")
+        now = time.monotonic()
+        due_sites = [site for site, due in _control_room_next_due.items() if now >= due]
+        for site in due_sites:
+            # 처리 성공/실패와 무관하게 다음 차례부터 다시 무작위 간격으로 — 실패했다고
+            # 그 현장만 영원히 멈춰있으면 안 된다.
+            _control_room_next_due[site] = now + random.uniform(_CONTROL_ROOM_MIN_INTERVAL, _CONTROL_ROOM_MAX_INTERVAL)
+            try:
+                substance = random.choice(_CONTROL_ROOM_SITES[site]["substances"])
+                event = _random_event(site, substance)
+
+                # 판정 + 장비 제어 — LLM을 전혀 거치지 않으므로 이벤트 루프를 막지 않는다
+                # (수 밀리초 안에 끝남). 이게 바로 "장비 제어는 즉시 처리"의 실제 구현이다.
+                judge_result = judge_and_actuate(event, _state["ctx"])
+                judgement = judge_result["judgement"]
+                severity = judgement.severity.value
+                sensor_changed_at = _now_hms()
+                _update_sensor(site, substance, event, severity)
+                METRIC_CONTROL_ROOM_EVENTS.labels(site=site, severity=severity).inc()
+
+                if severity != "정상":
+                    # 수동 시뮬레이션이 지금 CPU 코어를 점유 중이면 이번 차례의 LLM 서술은
+                    # 건너뛴다(사용자 요청, 2026-09-19) — 장비 제어는 이미 위에서 끝났으니
+                    # 이 스킵은 서술 문구만 늦어질 뿐 장비 반응 자체는 지연되지 않는다.
+                    if _simulation_in_progress:
+                        continue
+                    equipment_status = judge_result["equipment_status"]
+                    _set_site_alert_pending(site, substance, severity, equipment_status, sensor_changed_at)
+                    global _auto_tick_in_progress
+                    _auto_tick_in_progress = True
+                    try:
+                        start = time.perf_counter()
+                        narration = await loop.run_in_executor(
+                            None, _run_control_room_narration, event, judgement, equipment_status,
+                        )
+                        elapsed = round(time.perf_counter() - start, 2)
+                    finally:
+                        _auto_tick_in_progress = False
+                    _set_site_alert(site, substance, severity, narration, equipment_status, elapsed, sensor_changed_at)
+                else:
+                    _clear_site_alert_if_owner(site, substance)
+            except Exception as exc:  # noqa: BLE001 — 한 현장의 실패가 다른 현장·루프 전체를 막으면 안 됨
+                print(f"[control-room] {site} 처리 실패: {exc}")
 
 
 @app.get("/control-room", response_class=HTMLResponse)

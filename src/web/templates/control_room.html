@@ -4,7 +4,7 @@
 <div class="page-header">
   <div>
     <h1>산업안전 통합관제</h1>
-    <h2 style="margin-bottom:0;">각 현장의 여러 센서를 12초마다 실제 파이프라인(preview·Agent)으로 재계산합니다 — 정상으로 돌아오면 알림은 사라집니다</h2>
+    <h2 style="margin-bottom:0;">각 현장이 독립적인 무작위 주기(8~25초)로 실제 판정·장비 제어를 즉시 실행하고, LLM 안내 문구만 뒤이어 채웁니다 — 정상으로 돌아오면 장비는 전부 꺼진 상태로 표시됩니다</h2>
   </div>
 </div>
 
@@ -190,7 +190,7 @@ async function refreshControlRoom() {
     card.querySelector('.sensor-rows').innerHTML = rows || '<div class="stat">센서 없음</div>';
 
     const alertBox = card.querySelector('.site-alert');
-    if (s.alert) {
+    if (s.alert && s.alert.severity !== '정상') {
       const eq = s.alert.equipment || [];
       const equipHtml = eq.length
         ? '<div class="equipment-grid" style="margin: 6px 0;">' + eq.map(e =>
@@ -220,6 +220,21 @@ async function refreshControlRoom() {
         announceAlert(s.name, s.alert.narrative);
       }
       if (!s.alert.pending) announcedAt[s.name] = s.alert.logged_at;
+    } else if (s.alert) {
+      // 정상 기본 상태(서버 기동 직후, 또는 주의/위험에서 정상으로 복귀) — 장비는 전부
+      // 꺼짐으로 보여주고, 타임라인·안내 문구 같은 이벤트성 표시는 생략한다(사용자 요청,
+      // 2026-09-21 — "최초에는 모든 장비가 정상인 상태에서 시작").
+      const eq = s.alert.equipment || [];
+      const equipHtml = eq.length
+        ? '<div class="equipment-grid" style="margin: 6px 0;">' + eq.map(e =>
+            '<div class="equip-item equip-' + e.status + '"><span class="equip-dot"></span>' + escapeHtml(e.equipment) + '<span class="equip-status">' + escapeHtml(e.status) + '</span></div>'
+          ).join('') + '</div>'
+        : '';
+      alertBox.className = 'site-alert';
+      alertBox.innerHTML =
+        '<div class="feed-head"><span class="severity 정상">정상</span></div>' + equipHtml;
+      alertBox.style.display = 'block';
+      delete announcedAt[s.name];
     } else {
       alertBox.style.display = 'none';
       alertBox.innerHTML = '';

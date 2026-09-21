@@ -59,13 +59,13 @@
 <div class="page-header">
   <div>
     <h1>화장품 제조 AX — AI Agent PoC</h1>
-    <h2 style="margin-bottom:0;">강원정보문화산업진흥원 제안서 Layer 4(AI 에이전트) 검증용 — <strong>concept 검증 목적</strong>. Layer 1~3(장비·데이터·AI 예측모델)은 전부 mock 시나리오이며 실제 설비·학습된 모델과 연동돼 있지 않습니다. Layer 4의 판단·답변만 실제 sLLM 호출입니다.</h2>
+    <h2 style="margin-bottom:0;">강원정보문화산업진흥원 제안서 Layer 4(AI 에이전트) 검증용 — <strong>concept 검증 목적</strong>. Layer 1~3(설비·데이터·AI 예측모델)은 전부 mock 시나리오이며 실제 설비·학습된 모델과 연동돼 있지 않습니다. Layer 4의 판단·답변만 실제 sLLM 호출입니다. 제안서의 3대 핵심설비(천연물 추출기·미생물 발효기·초고압 나노분산 균질기) 중 <strong>미생물 발효기</strong> 공정 하나를 골라 전체 파이프라인을 시연합니다.</h2>
   </div>
 </div>
 
 <div class="card">
-  <strong>시나리오 데모 — 발효 공정 DO 이상 감지 → 조치</strong>
-  <div class="why">왼쪽부터 장비(Layer 1) → 시계열 데이터(Layer 2) → AI 분석 4종(Layer 3) → AI Agent(Layer 4, sLLM)로 데이터가 흐릅니다. 데이터는 정상 범위 안에서 무작위로 흔들리며 계속 생성됩니다. <strong>"악화 시작"</strong>을 누르면 그 순간부터 DO가 계속 나빠지는 방향으로, <strong>"정상으로 회복"</strong>을 누르면 다시 정상 범위로 돌아오는 방향으로 데이터가 만들어집니다. SOP 기준을 벗어나면 Agent가 자동으로 SOP를 근거로 판단해 권고하고, 운영자가 승인하면 그 결과가 Layer 1 장비 상태에 반영됩니다.</div>
+  <strong>시나리오 데모 — 미생물 발효기 DO(용존산소) 이상 감지 → 조치</strong>
+  <div class="why">왼쪽부터 설비(Layer 1, 미생물 발효기) → 시계열 데이터(Layer 2, PLC/IoT Gateway 경유) → AI 분석 4종(Layer 3) → AI Agent(Layer 4, sLLM)로 데이터가 흐릅니다. 데이터는 정상 범위 안에서 무작위로 흔들리며 계속 생성됩니다. <strong>"악화 시작"</strong>을 누르면 그 순간부터 DO가 계속 나빠지는 방향으로, <strong>"정상으로 회복"</strong>을 누르면 다시 정상 범위로 돌아오는 방향으로 데이터가 만들어집니다. SOP 기준을 벗어나면 Agent가 자동으로 SOP를 근거로 판단해 권고하고, 운영자가 승인하면 그 결과가 Layer 1 설비 상태에 반영됩니다.</div>
   <div class="scenario-controls">
     <button id="advance-btn">다음 시점 진행 ▶</button>
     <button id="auto-toggle">자동 진행 시작 ▶▶</button>
@@ -138,11 +138,14 @@ function escapeHtml(s) {
 // 2026-09-20) — "정상" 모드는 안전 범위 안에서 흔들리고, "악화" 모드는 DO가 계속
 // 떨어지는 쪽으로 무작위 값을 만든다. 운영자가 "악화 시작"/"정상으로 회복" 버튼으로 그
 // 방향을 직접 바꿀 수 있다.
+// 통신 필드는 제안서 슬라이드 9(요구사항 분석 — 필요센서 및 통신방식)에 나온 값 그대로
+// (python 쪽 agent/cosmetics_tools.py의 EQUIPMENT_MAP과 동일 출처 — 프런트/백엔드가
+// 서로 다른 값을 보여주지 않게 같은 원본에서 옮겼다).
 const EQUIP = [
-  { key: '발효온도_C', 장비: 'Pt100 RTD 온도센서', 단위: '℃' },
-  { key: 'pH_최종', 장비: 'pH 전극(유리전극)', 단위: '' },
-  { key: 'DO_평균_pct', 장비: 'DO 전극(격막형/광학식)', 단위: '%' },
-  { key: '교반RPM', 장비: '로터리 인코더', 단위: 'RPM' },
+  { key: '발효온도_C', 장비: 'Pt100 RTD 온도센서', 통신: '4-20mA→PLC AI 모듈', 단위: '℃' },
+  { key: 'pH_최종', 장비: 'pH 전극(유리전극)', 통신: 'RS-485(Modbus RTU)', 단위: '' },
+  { key: 'DO_평균_pct', 장비: 'DO 전극(격막형/광학식)', 통신: '4-20mA', 단위: '%' },
+  { key: '교반RPM', 장비: '로터리 인코더', 통신: 'RS-485(Modbus RTU)', 단위: 'RPM' },
 ];
 const SOP_DO_MIN = 20; // SOP-FMT-01 근거
 const AUTO_INTERVAL_MS = 2500;
@@ -223,10 +226,11 @@ function renderStage1(tick) {
       const abnormal = e.key === 'DO_평균_pct' && val < SOP_DO_MIN;
       return `<div class="equip-item ${abnormal ? 'equip-이상' : 'equip-실행됨'}" style="margin-top:6px;">
         <span class="equip-dot"></span>${escapeHtml(e.장비)}<span class="equip-status">${val}${e.단위}</span>
-      </div>`;
+      </div>
+      <div class="stat" style="margin:0 0 4px 18px; font-size:0.76rem;">${escapeHtml(e.통신)}</div>`;
     }).join('');
   }
-  el.innerHTML = `<div><span class="stage-no">1</span><strong>Layer 1 · 장비</strong></div>${body}`;
+  el.innerHTML = `<div><span class="stage-no">1</span><strong>Layer 1 · 미생물 발효기(설비)</strong></div>${body}`;
 }
 
 const MAX_LOG_ROWS = 10;
@@ -246,7 +250,8 @@ function renderStage2() {
       ${r.note ? `<div style="color:var(--llm); font-size:0.78rem; margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}
     </div>`).join('');
   }
-  el.innerHTML = `<div><span class="stage-no">2</span><strong>Layer 2 · 데이터(시계열, 최근 ${MAX_LOG_ROWS}개)</strong></div>${body}`;
+  el.innerHTML = `<div><span class="stage-no">2</span><strong>Layer 2 · 시계열 데이터</strong></div>
+    <div class="stat" style="margin:2px 0 8px;">PLC/IoT Gateway → DAQ (Modbus TCP/OPC-UA, 초/분 단위 수집) — 최근 ${MAX_LOG_ROWS}개</div>${body}`;
 }
 
 function modelStatuses(tick) {

@@ -140,7 +140,13 @@ def _run_llm_tool_loop(
     return narrative, tool_trace, guideline_sources, decisions
 
 
-def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3) -> dict:
+def judge_and_actuate(event: dict, ctx: ToolContext) -> dict:
+    """판정 + 장비 제어만 담당한다 — LLM을 전혀 부르지 않으므로 수 밀리초 안에 끝난다.
+    run_agent()가 내부에서 이 함수를 쓰지만, 자동관제 루프(web/app.py의
+    _control_room_loop)처럼 "장비 제어는 LLM 응답을 기다리지 말고 즉시 반영돼야 한다"는
+    요구가 있는 호출자는 이 함수만 이벤트 루프에서 직접(스레드 실행자 없이) 불러서 실제
+    tools.actuate_equipment 기록을 그 자리에서 만들 수 있다 — 그 뒤에 narrate()를 별도
+    스레드로 돌려도 이미 장비는 실행된 상태다."""
     decisions: list[Decision] = []
 
     judgement = rules.judge(event["value"], event["threshold"], event.get("lower_is_worse", False))
@@ -148,33 +154,47 @@ def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3
         "severity": judgement.severity.value, "ratio": round(judgement.ratio, 2),
     }))
 
+    equipment_status: list[dict] = []
+    if judgement.exceeded:
+        for action in rules.required_equipment_actions(event["category"], judgement.severity):
+            if action.risk == rules.Risk.LOW:
+                record = tools.actuate_equipment(ctx, action)
+            else:
+                record = tools.request_equipment_approval(ctx, action)
+            equipment_status.append(record)
+            decisions.append(Decision("rule", "equipment", record))
+
+    return {
+        "judgement": judgement,
+        "equipment_status": equipment_status,
+        "decisions": decisions,
+    }
+
+
+def narrate(
+    event: dict, judgement: rules.Judgement, equipment_status: list[dict], ctx: ToolContext, llm: Llama,
+    max_tool_turns: int = 3,
+) -> dict:
+    """judge_and_actuate()가 이미 정한 판정·장비 조치를 근거로 LLM이 안내문을 쓴다(수
+    초 걸림 — 반드시 별도 스레드/프로세스에서 호출할 것). 장비 조치를 다시 정하거나
+    실행하지 않는다 — equipment_status는 이미 일어난 사실로만 프롬프트에 인용된다."""
+    decisions: list[Decision] = []
+
     if not judgement.exceeded:
         if event.get("lower_is_worse"):
-            narrative = (
+            narrative_text = (
                 f"{event['location']}의 {event['substance']} 농도는 {event['value']}{event['unit']}로 "
                 f"안전 기준({event['threshold']}{event['unit']} 이상)을 충족합니다. 정상 범위입니다."
             )
         else:
-            narrative = (
+            narrative_text = (
                 f"{event['location']}의 {event['substance']} 농도는 {event['value']}{event['unit']}로 "
                 f"임계값({event['threshold']}{event['unit']}) 이내입니다. 정상 범위입니다."
             )
         return {
-            "judgement": judgement, "narrative": narrative, "tool_trace": [],
+            "narrative": narrative_text, "tool_trace": [],
             "notify_log": [], "report": None, "decisions": decisions,
         }
-
-    # 장비 제어는 규칙이 즉시 결정·실행한다 — LLM이 서술을 시작하기 전에 먼저 처리한다.
-    # (실제 현장이라면 문구가 완성되길 기다렸다가 환기를 켜는 건 말이 안 됨)
-    equipment_actions = rules.required_equipment_actions(event["category"], judgement.severity)
-    equipment_status: list[dict] = []
-    for action in equipment_actions:
-        if action.risk == rules.Risk.LOW:
-            record = tools.actuate_equipment(ctx, action)
-        else:
-            record = tools.request_equipment_approval(ctx, action)
-        equipment_status.append(record)
-        decisions.append(Decision("rule", "equipment", record))
 
     equipment_summary = (
         "; ".join(f"{r['equipment']}({r['status']})" for r in equipment_status)
@@ -189,31 +209,48 @@ def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3
         )},
     ]
 
-    narrative, tool_trace, guideline_sources, tool_decisions = _run_llm_tool_loop(
+    narrative_text, tool_trace, guideline_sources, tool_decisions = _run_llm_tool_loop(
         messages, ctx, llm, event["substance"], max_tool_turns,
     )
     decisions.extend(tool_decisions)
 
     # 알림/에스컬레이션/리포트 실행 여부는 코드가 위험도로 직접 결정한다 (LLM에게 안 맡김)
-    tools.notify(ctx, channel="현장관리자-알림방", message=narrative)
+    tools.notify(ctx, channel="현장관리자-알림방", message=narrative_text)
     decisions.append(Decision("rule", "notify", {"channel": "현장관리자-알림방"}))
     report = None
     if judgement.severity == rules.Severity.DANGER:
         tools.escalate(ctx, reason=f"{event['substance']} 위험 수준 감지 (임계값의 {judgement.ratio:.1f}배)")
         decisions.append(Decision("rule", "escalate", {"reason": event["substance"]}))
         report = tools.draft_incident_report(
-            ctx, event, judgement, narrative, list(dict.fromkeys(guideline_sources))
+            ctx, event, judgement, narrative_text, list(dict.fromkeys(guideline_sources))
         )
         decisions.append(Decision("rule", "draft_incident_report", {}))
 
     return {
-        "judgement": judgement,
-        "narrative": narrative,
+        "narrative": narrative_text,
         "tool_trace": tool_trace,
-        "equipment_status": equipment_status,
         "notify_log": list(ctx.notify_log),
         "report": report,
         "decisions": decisions,
+    }
+
+
+def run_agent(event: dict, ctx: ToolContext, llm: Llama, max_tool_turns: int = 3) -> dict:
+    """judge_and_actuate() + narrate()를 한 번에 묶어서 부르는 편의 함수 — /simulate처럼
+    "판정·장비·서술을 한 번에 다 받아도 되는" 호출자용. 장비 제어를 즉시 반영해야 하는
+    호출자(자동관제)는 두 함수를 따로 불러야 한다(모듈 docstring 참고)."""
+    judge_result = judge_and_actuate(event, ctx)
+    narrate_result = narrate(
+        event, judge_result["judgement"], judge_result["equipment_status"], ctx, llm, max_tool_turns,
+    )
+    return {
+        "judgement": judge_result["judgement"],
+        "narrative": narrate_result["narrative"],
+        "tool_trace": narrate_result["tool_trace"],
+        "equipment_status": judge_result["equipment_status"],
+        "notify_log": narrate_result["notify_log"],
+        "report": narrate_result["report"],
+        "decisions": judge_result["decisions"] + narrate_result["decisions"],
     }
 
 

@@ -85,3 +85,17 @@ _EQUIPMENT_RULES: dict[tuple[str, Severity], list[EquipmentAction]] = {
 
 def required_equipment_actions(category: str, severity: Severity) -> list[EquipmentAction]:
     return _EQUIPMENT_RULES.get((category, severity), [])
+
+
+def equipment_for_category(category: str) -> list[str]:
+    """이 카테고리가 어떤 위험도에서든 건드릴 수 있는 장비 전체 목록(중복 제거, 등장 순서
+    유지) — 정상 상태 화면에 "이 현장이 갖춘 장비들은 전부 꺼져 있다"를 보여줄 때 쓴다
+    (_EQUIPMENT_RULES에는 NORMAL 등급 항목이 아예 없어서 이렇게 위험도 전체를 합쳐야 한다)."""
+    names: list[str] = []
+    for (cat, _severity), actions in _EQUIPMENT_RULES.items():
+        if cat != category:
+            continue
+        for action in actions:
+            if action.name not in names:
+                names.append(action.name)
+    return names
