@@ -62,7 +62,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
 _F16_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-f16.gguf"
 _HERE = Path(__file__).resolve().parent
-_DECK_PPTX = _ROOT / "docs" / "교육자료" / "MLOps-Edge-Lab_교육자료_v4.pptx"
+_DECK_PPTX = _ROOT / "docs" / "교육자료" / "MLOps-Edge-Lab_교육자료_v5.pptx"
 _STATIC_DIR = _HERE / "static"
 _DECK_PDF = _STATIC_DIR / "deck.pdf"
 _STATIC_DIR.mkdir(parents=True, exist_ok=True)
