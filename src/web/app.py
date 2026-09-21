@@ -230,6 +230,7 @@ async def lifespan(_app: FastAPI):
     _load_gpu_llm_or_disable_gpu_profiles()
     _load_bidradar_pool()
     _backfill_bidradar_counters_if_missing()
+    _backfill_bidradar_daily_counts_if_missing()
     _bidradar_jobs.update(_load_bidradar_jobs_and_mark_interrupted())
     _save_bidradar_jobs()  # 위에서 "중단됨"으로 바꾼 job이 있으면 그 표시를 파일에도 즉시 반영
     _load_edu_rag_or_disable()
@@ -1341,10 +1342,12 @@ def bidradar_stats():
     때마다 지워져서 실제로 BidRadar가 접속했던 기록이 1시간 만에 사라진 걸
     사용자가 직접 겪고 지적함. 재시작해도 남아야 한다는 요구로 파일 기반 전환).
 
-    **총 건수 등 누적 숫자는 상세 로그가 아니라 _load_bidradar_counters()에서 온다**
-    — "2000건까지만 세지는데 숫자는 정확해야 한다"는 지적(2026-09-20) 이후 분리함.
-    상세 로그(call_log)는 "최근 호출 기록"·일별 추이 그래프에만 쓴다 — 이건 최근
-    수천 건 범위여도 실용상 문제없다(사용자도 "로그는 제한을 둬도 된다"고 확인)."""
+    **총 건수·일별 추이 등 누적 숫자는 상세 로그가 아니라 별도 영구 카운터에서 온다**
+    (_load_bidradar_counters, _load_bidradar_daily_counts) — "2000건까지만 세지는데
+    숫자는 정확해야 한다"(2026-09-20)에 이어 "일별 그래프도 2000건에서 잘리면 안
+    된다"(2026-09-21, classify-topic 물량이 53분 만에 상한을 채워서 그래프가 사실상
+    최근 1시간만 보여주고 있었음)는 지적까지 반영한 결과. 상세 로그(call_log)는 이제
+    "최근 호출 기록"(상위 50건) 표시에만 쓴다."""
     call_log = _load_bidradar_call_log()
     counters = _load_bidradar_counters()
     per_endpoint = {}
@@ -1376,7 +1379,7 @@ def bidradar_stats():
         "endpoints": per_endpoint,
         "recent": call_log[:50],
         "total_calls": sum(c["total"] for c in per_endpoint.values()),
-        "daily": _bidradar_daily_stats(call_log),
+        "daily": _bidradar_daily_stats(),
     })
 
 
@@ -2090,6 +2093,34 @@ def _bump_bidradar_counters(endpoint: str, success: bool, latency_ms: int, token
         _BIDRADAR_COUNTERS_PATH.write_text(json.dumps(counters, ensure_ascii=False), encoding="utf-8")
 
 
+_BIDRADAR_DAILY_COUNTS_PATH = _ROOT / "logs" / "bidradar_daily_counts.json"
+_bidradar_daily_lock = threading.Lock()
+
+
+def _load_bidradar_daily_counts() -> dict:
+    if not _BIDRADAR_DAILY_COUNTS_PATH.exists():
+        return {}
+    return json.loads(_BIDRADAR_DAILY_COUNTS_PATH.read_text(encoding="utf-8"))
+
+
+def _bump_bidradar_daily_count(endpoint: str, at: str) -> None:
+    """"일별 호출 추이" 그래프도 상세 로그(_MAX_BIDRADAR_LOG=2000건 상한)에서 계산하고
+    있었는데, 실측해보니 classify-topic 물량이 상한을 53분 만에 채울 정도로 많아서
+    (2026-09-21) 상세 로그가 "하루"는커녕 "한 시간"치도 못 담고 있었다 — 그래프가
+    사실상 최근 한 시간 남짓만 보여주는 셈이라 어제 날짜가 통째로 안 보였다.
+    "누적 숫자는 정확해야 한다, 2000에서 자르면 안 된다"는 지적(2026-09-21)에 따라,
+    날짜별 집계도 총계 카운터(_bump_bidradar_counters)와 같은 방식으로 상세 로그와
+    분리해 영구 보존한다."""
+    call_date = at[:10]
+    with _bidradar_daily_lock:
+        counts = _load_bidradar_daily_counts()
+        day = counts.setdefault(call_date, {})
+        day[endpoint] = day.get(endpoint, 0) + 1
+        counts[call_date] = day
+        _BIDRADAR_DAILY_COUNTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BIDRADAR_DAILY_COUNTS_PATH.write_text(json.dumps(counts, ensure_ascii=False), encoding="utf-8")
+
+
 def _log_bidradar_call(
     endpoint: str, trace_id: str, success: bool,
     latency_ms: int = 0, tokens_in: int = 0, tokens_out: int = 0, error_code: str | None = None,
@@ -2099,8 +2130,8 @@ def _log_bidradar_call(
     (2026-09-20 최초 구현), 배포마다 서비스가 재시작되면서 실제로 BidRadar가
     접속했던 기록이 후속 배포 한 번으로 사라진 걸 사용자가 직접 겪고("1시간 전쯤
     접속해왔던 내용은 왜 사라졌지?") 지적해서 파일 기반으로 전환. 상세 기록은
-    _MAX_BIDRADAR_LOG로 잘리지만, 누적 집계(_bump_bidradar_counters)는 별도로
-    영구 보존한다."""
+    _MAX_BIDRADAR_LOG로 잘리지만, 누적 집계(_bump_bidradar_counters)와 일별 집계
+    (_bump_bidradar_daily_count)는 별도로 영구 보존한다."""
     at = time.strftime("%Y-%m-%dT%H:%M:%S")
     entry = {
         "at": at, "endpoint": endpoint, "trace_id": trace_id, "success": success,
@@ -2110,6 +2141,7 @@ def _log_bidradar_call(
     with _BIDRADAR_CALL_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     _bump_bidradar_counters(endpoint, success, latency_ms, tokens_in, tokens_out, at)
+    _bump_bidradar_daily_count(endpoint, at)
 
 
 def _load_bidradar_call_log() -> list[dict]:
@@ -2150,23 +2182,36 @@ def _backfill_bidradar_counters_if_missing() -> None:
     print(f"[startup] BidRadar 누적 집계 백필 완료({len(call_log)}건 — 상세 로그가 그 이전에 이미 잘려있었다면 그 이전 호출은 복구 불가)")
 
 
+def _backfill_bidradar_daily_counts_if_missing() -> None:
+    """위 카운터 백필과 같은 이유·같은 시점에 1회 실행. 상세 로그가 이미 지금
+    시점 기준 최근 일부(2026-09-21 실측: 53분치)만 남아있으므로, 그 이전 날짜의
+    진짜 집계는 이 백필로도 복구 불가 — 오늘 이 시점부터는 정확하게 쌓인다."""
+    if _BIDRADAR_DAILY_COUNTS_PATH.exists():
+        return
+    call_log = _load_bidradar_call_log()
+    if not call_log:
+        return
+    for entry in reversed(call_log):
+        _bump_bidradar_daily_count(entry["endpoint"], entry["at"])
+    print(f"[startup] BidRadar 일별 집계 백필 완료({len(call_log)}건 — 상세 로그에 남아있던 범위만, 그 이전 날짜는 복구 불가)")
+
+
 _BIDRADAR_ENDPOINT_ORDER = ["extract-requirements", "classify-topic", "classify-doc"]  # A·B·C 순(9~12절 표기와 통일)
 _BIDRADAR_ENDPOINT_LABEL = {"extract-requirements": "A", "classify-topic": "B", "classify-doc": "C"}
 
 
-def _bidradar_daily_stats(call_log: list[dict]) -> list[dict]:
-    """날짜별 호출량 집계(사용자 요청, 2026-09-20 "매일의 기록을 그래프로") — "at"의
-    날짜 부분만 잘라 그룹핑한다. 엔드포인트(A/B/C)별로도 따로 세어서, 그날 어느
-    기능이 얼마나 쓰였는지 구분해서 보여준다(사용자 요청, "일별 호출에는 ABC를
-    각각 표시해줘")."""
-    by_date: dict[str, dict] = {}
-    for c in call_log:
-        call_date = c["at"][:10]
-        d = by_date.setdefault(call_date, {"date": call_date, "total": 0, **{ep: 0 for ep in _BIDRADAR_ENDPOINT_ORDER}})
-        d["total"] += 1
-        if c["endpoint"] in d:
-            d[c["endpoint"]] += 1
-    return sorted(by_date.values(), key=lambda d: d["date"])
+def _bidradar_daily_stats() -> list[dict]:
+    """날짜별 호출량 집계(사용자 요청, 2026-09-20 "매일의 기록을 그래프로", 엔드포인트별
+    분리는 "일별 호출에는 ABC를 각각 표시해줘"). **상세 로그가 아니라
+    _load_bidradar_daily_counts()의 영구 카운터에서 읽는다**(2026-09-21) — 상세 로그
+    (_MAX_BIDRADAR_LOG=2000건 상한)에서 계산했더니 classify-topic 물량이 너무 많아
+    상한이 53분 만에 차서 그래프가 사실상 최근 한 시간 남짓만 보여주고 있었다.
+    "누적 숫자는 정확해야 한다, 2000에서 자르면 안 된다"는 지적에 따라 분리."""
+    counts = _load_bidradar_daily_counts()
+    result = []
+    for call_date, day in counts.items():
+        result.append({"date": call_date, "total": sum(day.values()), **{ep: day.get(ep, 0) for ep in _BIDRADAR_ENDPOINT_ORDER}})
+    return sorted(result, key=lambda d: d["date"])
 
 
 def _bidradar_check_auth(request: Request) -> JSONResponse | None:
