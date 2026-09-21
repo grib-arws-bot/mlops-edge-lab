@@ -86,7 +86,7 @@
 
   <div class="card debate-stage-card">
     <strong>4. 토론 결과</strong>
-    <div class="why">왼쪽(토론 전) → 오른쪽(토론 후) 팀 흐름입니다 — 굵기가 인원 수, 초록 띠는 유지, 주황 띠는 다른 팀으로 이동을 나타냅니다.</div>
+    <div class="why">각 주제(팀)별로 왼쪽 막대가 토론 전 인원, 오른쪽 막대가 토론 후 인원입니다 — 오른쪽 막대의 초록은 원래 이 팀이었던 학생, 주황은 다른 팀에서 옮겨온 학생입니다.</div>
     <div id="summary-line" class="stat" style="font-weight:600; margin-top:8px;"></div>
     <div id="summary-text" style="margin-top:8px;"></div>
     <div id="graph-area" style="margin-top:12px; overflow-x:auto;"></div>
@@ -247,66 +247,65 @@ function renderCompare(students) {
     </div>`).join('');
 }
 
-// 각 의견별(학생별) 전/후 변화를 팀 간 흐름(Sankey류 다이어그램)으로 보여준다 —
-// 사용자 지적(2026-09-20): 전환 행렬은 팀 개수가 늘어나면 칸이 N² 로 늘어 읽기
-// 어려워진다. 흐름 그래프는 팀이 늘어도 세로 길이만 늘어나 훨씬 잘 읽힌다. 외부
-// 차트 라이브러리 없이(이 프로젝트 원칙 — 빌드 도구 없는 순수 HTML/JS) 순수 SVG로
-// 직접 그린다.
-function renderSankey(students, teamLabels) {
-  const boxW = 12, colGap = 260, leftX = 90, topPad = 14, rowGap = 6;
-  const pxPerStudent = 14;
+// 팀(주제/입장)별 토론 전/후 인원수를 막대그래프로 보여준다(사용자 요청,
+// 2026-09-21 — 이전의 Sankey류 흐름도는 라벨과 흐름 띠가 겹쳐 읽기 어렵다는
+// 지적을 받음). "후" 막대는 유지(원래 이 팀이었고 그대로 남음)와 유입(다른
+// 팀에서 옮겨옴)을 색으로 나눠 쌓아서, 전/후 비교와 이동 정보를 한 막대에서
+// 함께 보여준다. 외부 차트 라이브러리 없이(이 프로젝트 원칙) 순수 SVG로 그린다.
+function wrapLabelLines(text, maxChars) {
+  const words = text.split(' ');
+  const lines = [];
+  let cur = '';
+  words.forEach(w => {
+    const next = cur ? `${cur} ${w}` : w;
+    if (next.length > maxChars && cur) { lines.push(cur); cur = w; } else { cur = next; }
+  });
+  if (cur) lines.push(cur);
+  return lines.slice(0, 2);
+}
 
-  const beforeCount = {}, afterCount = {};
-  teamLabels.forEach(t => { beforeCount[t] = 0; afterCount[t] = 0; });
+function renderBeforeAfterBars(students, teamLabels) {
+  const groupW = 110, barW = 30, barGap = 8, topPad = 26, chartH = 150, labelH = 52;
+  const marginX = 20;
+
+  const beforeCount = {}, stayedCount = {}, movedInCount = {};
+  teamLabels.forEach(t => { beforeCount[t] = 0; stayedCount[t] = 0; movedInCount[t] = 0; });
   students.forEach(s => {
     if (s.team_before in beforeCount) beforeCount[s.team_before]++;
-    if (s.team_after in afterCount) afterCount[s.team_after]++;
+    if (s.team_before === s.team_after && s.team_after in stayedCount) stayedCount[s.team_after]++;
+    else if (s.team_after in movedInCount) movedInCount[s.team_after]++;
   });
+  const afterCount = {};
+  teamLabels.forEach(t => { afterCount[t] = stayedCount[t] + movedInCount[t]; });
 
-  let yLeft = {}, cursor = topPad;
-  teamLabels.forEach(t => { yLeft[t] = cursor; cursor += Math.max(beforeCount[t], 1) * pxPerStudent + rowGap; });
-  let yRight = {}; cursor = topPad;
-  teamLabels.forEach(t => { yRight[t] = cursor; cursor += Math.max(afterCount[t], 1) * pxPerStudent + rowGap; });
-  const totalH = Math.max(cursor, topPad) + 10;
-  const rightX = leftX + colGap;
-  const W = rightX + boxW + 140;
+  const maxCount = Math.max(1, ...teamLabels.map(t => Math.max(beforeCount[t], afterCount[t])));
+  const pxPerUnit = chartH / maxCount;
+  const baseY = topPad + chartH;
 
-  const flowsByFrom = {};
-  teamLabels.forEach(from => { flowsByFrom[from] = []; });
-  teamLabels.forEach(from => {
-    teamLabels.forEach(to => {
-      const count = students.filter(s => s.team_before === from && s.team_after === to).length;
-      if (count > 0) flowsByFrom[from].push({ to, count });
-    });
-  });
+  const W = marginX * 2 + teamLabels.length * groupW;
+  const totalH = topPad + chartH + labelH;
+  let svg = `<svg viewBox="0 0 ${W} ${totalH}" width="100%" style="max-width:${Math.max(W, 360)}px; height:auto;">`;
+  svg += `<line x1="${marginX}" y1="${baseY}" x2="${W - marginX}" y2="${baseY}" stroke="var(--border)" stroke-width="1"/>`;
 
-  let svg = `<svg viewBox="0 0 ${W} ${totalH}" width="100%" style="max-width:${W}px; height:auto;">`;
+  teamLabels.forEach((t, i) => {
+    const gx = marginX + i * groupW + (groupW - (barW * 2 + barGap)) / 2;
+    const x1 = gx, x2 = gx + barW + barGap;
 
-  // 팀 상자 + 라벨
-  teamLabels.forEach(t => {
-    const hL = Math.max(beforeCount[t], 1) * pxPerStudent;
-    const hR = Math.max(afterCount[t], 1) * pxPerStudent;
-    svg += `<rect x="${leftX}" y="${yLeft[t]}" width="${boxW}" height="${hL}" fill="var(--accent)" rx="2"/>`;
-    svg += `<rect x="${rightX}" y="${yRight[t]}" width="${boxW}" height="${hR}" fill="var(--accent)" rx="2"/>`;
-    svg += `<text class="sankey-label" x="${leftX - 8}" y="${yLeft[t] + hL / 2 + 3}" text-anchor="end">${escapeHtml(t)} (${beforeCount[t]})</text>`;
-    svg += `<text class="sankey-label" x="${rightX + boxW + 8}" y="${yRight[t] + hR / 2 + 3}">${escapeHtml(t)} (${afterCount[t]})</text>`;
-  });
+    const h1 = beforeCount[t] * pxPerUnit;
+    svg += `<rect x="${x1}" y="${baseY - h1}" width="${barW}" height="${h1}" fill="var(--accent)" rx="2"/>`;
+    svg += `<text class="sankey-count" x="${x1 + barW / 2}" y="${baseY - h1 - 6}" text-anchor="middle">${beforeCount[t]}</text>`;
 
-  // 흐름 띠 — from 상자 안에서 위에서부터 순서대로 잘라 쓰고(leftCursor), to 상자도
-  // 같은 방식으로 채워간다(rightCursor). from===to(유지)를 항상 먼저 그려서 대체로
-  // 위쪽에 정렬되게 한다 — 흐름이 서로 덜 겹쳐 더 읽기 쉽다.
-  const leftCursor = { ...yLeft }, rightCursor = { ...yRight };
-  teamLabels.forEach(from => {
-    const flows = flowsByFrom[from].slice().sort((a, b) => (a.to === from ? -1 : b.to === from ? 1 : 0));
-    flows.forEach(({ to, count }) => {
-      const h = count * pxPerStudent;
-      const y0 = leftCursor[from], y1 = rightCursor[to];
-      leftCursor[from] += h; rightCursor[to] += h;
-      const x0 = leftX + boxW, x1 = rightX;
-      const midX = (x0 + x1) / 2;
-      const color = from === to ? 'var(--normal)' : 'var(--caution)';
-      svg += `<path d="M${x0},${y0} C${midX},${y0} ${midX},${y1} ${x1},${y1} L${x1},${y1 + h} C${midX},${y1 + h} ${midX},${y0 + h} ${x0},${y0 + h} Z" fill="${color}" opacity="0.4"/>`;
-      if (h >= 12) svg += `<text class="sankey-count" x="${midX}" y="${(y0 + y1) / 2 + h / 2}" text-anchor="middle">${count}</text>`;
+    const hStay = stayedCount[t] * pxPerUnit, hMoved = movedInCount[t] * pxPerUnit;
+    svg += `<rect x="${x2}" y="${baseY - hStay}" width="${barW}" height="${hStay}" fill="var(--normal)" rx="2"/>`;
+    if (hMoved > 0) svg += `<rect x="${x2}" y="${baseY - hStay - hMoved}" width="${barW}" height="${hMoved}" fill="var(--caution)" rx="2"/>`;
+    svg += `<text class="sankey-count" x="${x2 + barW / 2}" y="${baseY - hStay - hMoved - 6}" text-anchor="middle">${afterCount[t]}</text>`;
+
+    svg += `<text class="sankey-label" x="${x1 + barW / 2}" y="${baseY + 14}" text-anchor="middle">전</text>`;
+    svg += `<text class="sankey-label" x="${x2 + barW / 2}" y="${baseY + 14}" text-anchor="middle">후</text>`;
+
+    const lines = wrapLabelLines(t, 12);
+    lines.forEach((line, li) => {
+      svg += `<text class="sankey-label" x="${gx + (barW * 2 + barGap) / 2}" y="${baseY + 30 + li * 12}" text-anchor="middle">${escapeHtml(line)}</text>`;
     });
   });
 
@@ -336,7 +335,7 @@ document.getElementById('conclude-btn').addEventListener('click', async () => {
       `유지 ${data.summary.stayed}명 · 이동 ${data.summary.moved}명 (총 ${data.summary.total}명)`;
     document.getElementById('summary-text').textContent = data.summary_text || '';
     const teamLabels = debateTeams.map(t => t.label);
-    document.getElementById('graph-area').innerHTML = renderSankey(data.students, teamLabels);
+    document.getElementById('graph-area').innerHTML = renderBeforeAfterBars(data.students, teamLabels);
   } finally {
     btn.disabled = false;
   }
