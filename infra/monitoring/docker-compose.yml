@@ -13,6 +13,13 @@ services:
       - --web.console.libraries=/usr/share/prometheus/console_libraries
       - --web.console.templates=/usr/share/prometheus/consoles
       - --web.listen-address=:8083
+      # 8081 뒤 nginx가 /prometheus/ 경로로 분기해준다(28082~84 외부 포트포워딩이
+      # 깨져서 8081/nginx 하나로 통합, 의사결정_로그 113번 이어서). Prometheus는
+      # MLflow와 달리 이 프로젝트 코드가 API를 직접 호출하는 곳이 없어(사람이 보는
+      # 대시보드 전용) 경로 접두어를 바꿔도 안전 — route-prefix는 nginx가 경로를
+      # 안 벗기고 그대로 넘겨준다는 전제(MLflow의 static-prefix와 반대 방향).
+      - --web.route-prefix=/prometheus
+      - --web.external-url=http://thingx.grib-iot.com:28081/prometheus/
     restart: unless-stopped
 
   grafana:
@@ -20,6 +27,9 @@ services:
     network_mode: host  # Prometheus와 동일한 이유
     environment:
       - GF_SERVER_HTTP_PORT=8084
+      # Grafana 공식 리버스 프록시 서브패스 지원(Prometheus와 같은 이유로 안전).
+      - GF_SERVER_ROOT_URL=http://thingx.grib-iot.com:28081/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
     volumes:
       - grafana-data:/var/lib/grafana
     restart: unless-stopped

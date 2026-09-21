@@ -5,7 +5,7 @@ After=network.target
 [Service]
 WorkingDirectory=%h/mlops-edge-lab
 Environment=PYTHONPATH=%h/mlops-edge-lab/src
-ExecStart=%h/mlops-edge-lab/.venv/bin/uvicorn web.app:app --host 0.0.0.0 --port 8081
+ExecStart=%h/mlops-edge-lab/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8085
 Restart=always
 RestartSec=5
 
