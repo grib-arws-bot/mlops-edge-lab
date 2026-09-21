@@ -298,7 +298,7 @@ def _mlflow_finetune_metrics() -> dict | None:
         import mlflow
         from mlflow.tracking import MlflowClient
 
-        mlflow.set_tracking_uri("http://127.0.0.1:8082")
+        mlflow.set_tracking_uri("http://127.0.0.1:8082/mlflow")
         client = MlflowClient()
         exp = client.get_experiment_by_name("sllm-finetune")
         if not exp:

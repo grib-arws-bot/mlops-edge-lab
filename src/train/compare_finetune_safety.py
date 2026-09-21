@@ -21,7 +21,7 @@ _ADAPTER_DIR = _ROOT / "experiments" / "toy-sensor-lora" / "final"
 _VAL_PATH = _ROOT / "data" / "processed" / "toy_sensor_alerts_val.jsonl"
 _OUT_PATH = _ROOT / "data" / "processed" / "finetune_comparison_safety.json"
 
-os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
+os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 
 
 def run_comparison() -> dict[str, float]:

@@ -31,7 +31,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _ADAPTER_DIR = _ROOT / "experiments" / "toy-sensor-lora" / "final"
 _VAL_PATH = _ROOT / "data" / "processed" / "toy_sensor_alerts_val.jsonl"
 
-os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
+os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 
 
 class CharTokenizer:

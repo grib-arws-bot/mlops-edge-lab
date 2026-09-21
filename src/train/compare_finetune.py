@@ -22,7 +22,7 @@ _ADAPTER_DIR = _ROOT / "experiments" / "edu-social-lora" / "final"
 _VAL_PATH = _ROOT / "data" / "processed" / "edu_social_val.jsonl"
 _OUT_PATH = _ROOT / "data" / "processed" / "finetune_comparison.json"
 
-os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
+os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 
 
 def run_comparison() -> dict[str, float]:

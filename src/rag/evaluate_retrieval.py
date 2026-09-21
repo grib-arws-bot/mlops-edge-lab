@@ -27,7 +27,7 @@ from rag import query_edu
 _ROOT = Path(__file__).resolve().parents[2]
 _GOLDEN_SET_PATH = _ROOT / "data" / "processed" / "rag_golden_set.jsonl"
 
-os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
+os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 
 
 def _load_golden_set(path: Path = _GOLDEN_SET_PATH) -> list[dict]:

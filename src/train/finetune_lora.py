@@ -33,7 +33,7 @@ MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 _ROOT = Path(__file__).resolve().parents[2]
 _DATA_DIR = _ROOT / "data" / "processed"
 
-os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
+os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 os.environ.setdefault("MLFLOW_EXPERIMENT_NAME", "sllm-finetune")
 
 

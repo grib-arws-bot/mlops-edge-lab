@@ -30,7 +30,7 @@ _MODELS = {
 }
 _OUT_PATH = _ROOT / "data" / "processed" / "quant_comparison.jsonl"
 
-os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082")
+os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 
 
 def _generate(llm: Llama, system_msg: dict, user_msg: dict) -> str:

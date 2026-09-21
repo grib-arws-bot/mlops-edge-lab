@@ -31,7 +31,7 @@ _WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL")
 _SYSTEMD_UNITS = ["mlops-web", "mlops-mlflow", "mlops-actions-runner"]
 _HTTP_CHECKS = {
     "web": "http://127.0.0.1:8081/",
-    "mlflow": "http://127.0.0.1:8082/",
+    "mlflow": "http://127.0.0.1:8082/mlflow/",
 }
 
 
