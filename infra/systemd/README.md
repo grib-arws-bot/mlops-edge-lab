@@ -64,13 +64,19 @@ loginctl enable-linger $(whoami)
 - `mlops-web`: `127.0.0.1:8085`로 전환(이 파일의 `ExecStart` 참고). nginx 설정은
   `/etc/nginx/sites-available/mlops-web`(이 저장소엔 없음, root 소유라 서버에서 직접 관리) —
   `location / { proxy_pass http://127.0.0.1:8085; }`로 전체 경로를 그대로 넘긴다.
-- Prometheus·Grafana도 같은 8081 밑에 `/prometheus/`·`/grafana/` 경로로 물릴 예정(각자 공식
+- Prometheus·Grafana도 같은 8081 밑에 `/prometheus/`·`/grafana/` 경로로 물려있다(각자 공식
   서브패스 지원 플래그 사용, `infra/monitoring/docker-compose.yml` 참고) — 28082~84 외부
-  포트포워딩이 깨진 게 계기.
-- **MLflow는 예외** — `--static-prefix`가 웹 UI 링크만 바꾸는 게 아니라 API 라우팅 자체를
-  바꿔버려서, 이 저장소의 학습·평가 스크립트 10여 곳이 쓰는 `http://127.0.0.1:8082`(접두어 없음)
-  직접 호출이 전부 깨진다(실측 확인, 되돌림). MLflow는 nginx로 경로 분기하지 않고, 기존
-  `28082→8082` 포트포워딩 자체를 관리자에게 복구 요청하는 쪽으로 처리한다.
+  포트포워딩이 애초에 설정된 적이 없었던 게 계기(관리자 확인).
+- **MLflow도 결국 `/mlflow/` 경로로 통합했다**(의사결정_로그 115번). 처음엔 `--static-prefix`가
+  API 라우팅 네임스페이스 자체를 바꿔버리는 문제 때문에(114번) 제외했었지만, 이 저장소의
+  학습·평가·헬스체크 스크립트 10여 곳의 `mlflow.set_tracking_uri(...)`/헬스체크 URL을 전부
+  `/mlflow` 접두어 포함 형태로 먼저 고친 뒤 다시 켰다. 거기서 한 번 더 걸린 게 MLflow 3.16의
+  `HostValidationMiddleware`(DNS 리바인딩 방지) — 이 파일의 `Environment=MLFLOW_SERVER_ALLOWED_HOSTS=...`
+  줄이 그 대응이다. **이 환경변수는 기본 허용 목록에 append가 아니라 replace**이므로,
+  `localhost`/`127.0.0.1`/사설 IP 대역 기본값 전체 + nginx가 넘기는 외부 Host(`thingx.grib-iot.com`,
+  포트 없는 형태 — nginx `$host`가 포트를 생략함)를 전부 같이 적어야 한다. 이 값을 바꿀 땐 반드시
+  로컬 접속(`curl 127.0.0.1:8082/mlflow/`)과 외부 접속(`curl thingx.grib-iot.com:28081/mlflow/`)
+  둘 다 재확인할 것 — 한쪽만 고치면 반대쪽이 조용히 막힌다.
 - 새 내부 포트가 필요하면 반드시 `ss -tlnp`로 전체 목록을 먼저 확인할 것 — 8082는 MLflow가
   이미 쓰고 있는데 확인 없이 골랐다가 크래시 루프로 실제 다운타임이 났었다.
 

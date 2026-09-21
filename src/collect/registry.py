@@ -182,7 +182,15 @@ SOURCES: list[SourceConfig] = [
             allows_commercial=True,
             source_policy_note="data.go.kr 등재, 2026-09-19 리서치 확인. 수치가 아니라 설명문/용어정의 — 지리·경제 지표의 '무슨 뜻인가'를 채워줌.",
         ),
-        notes="data.go.kr 활용신청, 개발·운영 단계 모두 자동승인 확인 — 승인 대기 없이 바로 구현 가능. data.go.kr 계정만 있으면 즉시 착수.",
+        notes=(
+            "data.go.kr 활용신청, 개발·운영 단계 모두 자동승인 확인. 2026-09-21: BidRadar 프로젝트가 "
+            "이미 승인받아 쓰던 계정의 인증키를 재사용하기로 사용자 결정(서로 다른 프로젝트지만 "
+            "동일인 소유 data.go.kr 계정, CLAUDE.md의 '인프라 분리' 원칙과 별개로 키 재사용만 허용된 "
+            "케이스 — 의사결정_로그 참고). 키는 `grib-ai-server`의 "
+            "`~/secrets/mlops-edge-lab/education_api_keys.env`(저장소 밖, git 미추적)에 "
+            "`MLOPS_EDU_KOSIS_DESC_KEY`로 있음 — 커넥터 구현 시 이 env var를 로드해서 쓸 것. "
+            "인증키는 이미 있으니 커넥터 코드만 작성하면 바로 착수 가능."
+        ),
         implemented=False,
     ),
     SourceConfig(
@@ -198,7 +206,12 @@ SOURCES: list[SourceConfig] = [
             allows_commercial=True,
             source_policy_note="data.go.kr 15141085. 기본권·인권·헌법 성취기준 직결, 판례요지가 해설문 형태.",
         ),
-        notes="data.go.kr 활용신청, 개발단계 자동승인 확인(운영단계는 심의) — 개발계정으로 우선 착수 가능.",
+        notes=(
+            "data.go.kr 활용신청, 개발단계 자동승인 확인(운영단계는 심의). 2026-09-21: BidRadar 계정의 "
+            "인증키를 재사용하기로 사용자 결정(kosis_desc와 동일 배경). "
+            "`~/secrets/mlops-edge-lab/education_api_keys.env`에 `MLOPS_EDU_CONSTITUTIONAL_COURT_KEY`로 "
+            "있음 — 커넥터 코드만 작성하면 바로 착수 가능."
+        ),
         implemented=False,
     ),
     SourceConfig(
@@ -214,7 +227,14 @@ SOURCES: list[SourceConfig] = [
             allows_commercial=True,
             source_policy_note="어려운 법률용어를 일상어로 매핑한 데이터를 기관이 직접 제공 — 중학생 눈높이 변환에 직접 쓸모 있음.",
         ),
-        notes="API 유형이 LINK로 표시됨 — 실제 호출이 open.law.go.kr로 넘어갈 가능성 있어 law_go_kr과 인증키를 공유할 수도 있음(미확인, 신청 시 확인 필요).",
+        notes=(
+            "API 유형이 LINK로 표시됨 — 2026-09-21 BidRadar 계정 스프레드시트에서 실제 확인해보니 "
+            "호출 주소가 open.law.go.kr(OC 인증키 방식)이었음, 예상대로 law_go_kr과 같은 인증 체계로 "
+            "보임(단, law_go_kr 자체를 이 키로 실제 호출해서 검증한 적은 아직 없음 — 커넥터 구현 시 "
+            "가장 먼저 확인할 것). BidRadar 계정의 키를 재사용하기로 사용자 결정(kosis_desc와 동일 "
+            "배경) — `~/secrets/mlops-edge-lab/education_api_keys.env`에 `MLOPS_EDU_LAW_TERMS_KB_KEY`로 "
+            "있음."
+        ),
         implemented=False,
     ),
 ]

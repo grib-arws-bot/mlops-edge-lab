@@ -4,6 +4,10 @@ After=network.target
 
 [Service]
 WorkingDirectory=%h/mlops-edge-lab
+# MLflow 3.16+ HostValidationMiddleware 대응 — 기본 허용 목록(localhost/127.0.0.1/사설망)에
+# nginx 외부 도메인을 추가한 것. 이 env var는 기본값에 append가 아니라 replace이므로
+# 기본 목록 전체를 같이 적어야 한다 (의사결정_로그.md 115번).
+Environment=MLFLOW_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],0.0.0.0,localhost:*,127.0.0.1:*,[::1]:*,0.0.0.0:*,192.168.*,10.*,172.16.*,172.17.*,172.18.*,172.19.*,172.20.*,172.21.*,172.22.*,172.23.*,172.24.*,172.25.*,172.26.*,172.27.*,172.28.*,172.29.*,172.30.*,172.31.*,fc00:*,fd00:*,thingx.grib-iot.com,thingx.grib-iot.com:28081
 ExecStart=%h/mlops-edge-lab/.venv/bin/mlflow server --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root %h/mlops-edge-lab/mlflow/artifacts --host 127.0.0.1 --port 8082 --static-prefix /mlflow
 Restart=always
 RestartSec=5
