@@ -2029,6 +2029,7 @@ async def edu_admin_debate_teams(request: Request):
         )
         groups_meta = _parse_team_label_list(label_raw)
         if len(groups_meta) != len(team_ids):
+            print(f"[debate/teams] label count mismatch: got {len(groups_meta)}, want {len(team_ids)}\nraw={label_raw!r}", file=sys.stderr)
             groups_meta = (groups_meta + [{}] * len(team_ids))[:len(team_ids)]
 
         id_to_name = {s["id"]: s["name"] for s in students}
