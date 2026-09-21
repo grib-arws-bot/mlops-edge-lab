@@ -178,12 +178,18 @@ document.getElementById('gen-opinions-btn').addEventListener('click', async () =
 function renderTeams(teams) {
   const area = document.getElementById('teams-area');
   area.innerHTML = teams.map(t => {
+    const names = (t.student_names && t.student_names.length) ? t.student_names : t.student_ids.map(id => {
+      const s = (debateStudents || []).find(x => x.id === id);
+      return s ? s.name : `학생${id}`;
+    });
     const materialsHtml = t.materials.length
       ? t.materials.map(m => `<div class="stat">· ${escapeHtml(m.title)} (score=${m.score})</div>`).join('')
       : '<div class="stat" style="color:var(--danger);">⚠ 이 팀에 대한 근거 자료가 부족합니다.</div>';
     return `
       <div class="card debate-team-card">
         <strong><span class="team-badge">${escapeHtml(t.label)}</span> · ${t.student_ids.length}명</strong>
+        <div class="stat" style="margin-top:6px;">${names.map(escapeHtml).join(', ')}</div>
+        ${t.reason ? `<div class="stat" style="margin-top:4px; color:var(--accent);">왜 이렇게 묶였나 — ${escapeHtml(t.reason)}</div>` : ''}
         <div class="stat" style="margin-top:8px; font-weight:600;">참고 자료</div>
         ${materialsHtml}
       </div>`;

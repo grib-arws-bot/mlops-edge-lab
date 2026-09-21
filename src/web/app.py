@@ -1828,9 +1828,11 @@ _DEBATE_OPINIONS_PROMPT_TMPL = (
 _DEBATE_TEAM_LABEL_PROMPT_TMPL = (
     "당신은 중학교 사회 토론 수업을 준비하는 선생님입니다. 아래는 [토론 주제]에 대해 이미 "
     "비슷한 의견끼리 묶여 있는 {k}개 그룹입니다(그룹을 다시 나누지 마세요 — 이미 확정된 그룹임). "
-    "각 그룹 학생들의 공통된 관점을 5~15자의 짧은 표현으로 요약해 이름만 붙이세요.\n"
+    "각 그룹 학생들의 공통된 관점을 5~15자의 짧은 표현으로 요약해 이름을 붙이고, 왜 이 학생들이 "
+    "한 그룹으로 묶였는지 그 근거를 30~60자 한 문장으로 쓰세요(그룹 내 의견들의 공통점을 "
+    "구체적으로 짚을 것 — \"비슷해서\" 같은 막연한 설명 금지).\n"
     "설명 없이 반드시 아래 JSON 형식으로만 답하세요(그룹 순서와 정확히 같은 순서, {k}개):\n"
-    '{{"labels": ["...", ...]}}'
+    '{{"groups": [{{"label": "...", "reason": "..."}}, ...]}}'
 )
 
 _DEBATE_SUMMARY_PROMPT = (
@@ -1920,14 +1922,24 @@ async def edu_admin_debate_opinions(request: Request):
     loop = asyncio.get_event_loop()
 
     def _run():
-        stance_plan = _debate_stance_plan(num_students)
-        plan_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(stance_plan))
-        raw = _llm_raw_call(
-            _DEBATE_OPINIONS_PROMPT_TMPL.format(n=num_students, stance_plan=plan_text),
-            f"[토론 주제]\n{topic}",
-            temperature=0.9, max_tokens=120 * num_students,
-        )
-        students_raw = _parse_student_list(raw)
+        # 요청한 인원수(예: 10명)보다 적게 파싱되는 경우가 실제로 있었다(2026-09-21
+        # 사용자 실측: 10명 요청 → 9명만 나옴) — JSON 마지막 항목이 토큰 한도 근처에서
+        # 잘리거나 LLM이 개수를 놓치는 경우. 한 번에 포기하지 않고 최대 2회까지
+        # 재시도해서, 그중 가장 많이 확보한 결과를 쓴다.
+        students_raw: list[dict] = []
+        for _attempt in range(2):
+            stance_plan = _debate_stance_plan(num_students)
+            plan_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(stance_plan))
+            raw = _llm_raw_call(
+                _DEBATE_OPINIONS_PROMPT_TMPL.format(n=num_students, stance_plan=plan_text),
+                f"[토론 주제]\n{topic}",
+                temperature=0.9, max_tokens=140 * num_students,
+            )
+            parsed = _parse_student_list(raw)
+            if len(parsed) > len(students_raw):
+                students_raw = parsed
+            if len(students_raw) >= num_students:
+                break
         if len(students_raw) < 2:
             raise ValueError("학생 의견 생성 실패")
         # 이름이 비었거나 중복되면 코드가 안전하게 보정 — LLM이 가짜 이름을 잘 못
@@ -1997,21 +2009,25 @@ async def edu_admin_debate_teams(request: Request):
         label_data = _llm_json_call(
             _DEBATE_TEAM_LABEL_PROMPT_TMPL.format(k=len(team_ids)),
             f"[토론 주제]\n{topic}\n\n[그룹별 샘플 의견]\n{sample_text}",
-            temperature=0.3, max_tokens=300,
+            temperature=0.3, max_tokens=max(300, 150 * len(team_ids)),
         )
-        labels = label_data.get("labels", [])
-        if len(labels) != len(team_ids):
-            labels = [f"팀 {i + 1}" for i in range(len(team_ids))]
+        groups_meta = label_data.get("groups", [])
+        if len(groups_meta) != len(team_ids):
+            groups_meta = [{} for _ in range(len(team_ids))]
 
+        id_to_name = {s["id"]: s["name"] for s in students}
         teams = []
         for rank, tid in enumerate(team_ids):
-            label = (labels[rank] or "").strip() or f"팀 {rank + 1}"
+            meta = groups_meta[rank] if isinstance(groups_meta[rank], dict) else {}
+            label = (meta.get("label") or "").strip() or f"팀 {rank + 1}"
+            reason = (meta.get("reason") or "").strip()
             hits = query_edu.retrieve(
                 f"{topic} {label}", _state["edu_embed_model"], _state["edu_index"], _state["edu_meta"],
                 _state["edu_bm25"], top_k=3, allowed_source_ids=allowed_source_ids,
             )
             teams.append({
-                "id": rank, "label": label, "student_ids": groups[tid],
+                "id": rank, "label": label, "reason": reason, "student_ids": groups[tid],
+                "student_names": [id_to_name[sid] for sid in groups[tid]],
                 "materials": [{"title": h["title"], "text": h["text"][:500], "score": round(score, 3)} for h, score in hits],
             })
         return teams
@@ -2085,14 +2101,20 @@ async def edu_admin_debate_conclude(request: Request):
         centroids = np.asarray(centroids)
 
         results = []
-        margins = []  # (결과 인덱스, own팀 거리 - 최근접 다른팀 거리) — 작을수록 경계선에 가까움
+        margins = []  # (결과 인덱스, 1등-2등 거리차) — 작을수록 경계선(다른 팀과 거의 붙어있음)
+        all_dists = []
         for i, s in enumerate(students):
             own_team = team_by_student[s["id"]]
             dists_after = np.linalg.norm(centroids - after_vecs[i], axis=1)
+            all_dists.append(dists_after)
             nearest_team = teams[int(dists_after.argmin())]
             stayed = nearest_team["id"] == own_team["id"]
-            own_team_idx = teams.index(own_team)
-            margin = dists_after[own_team_idx] - dists_after.min()
+            sorted_dists = np.sort(dists_after)
+            # 자기 팀이 항상 1등(stayed 정의상)이므로 "1등 거리 - 1등 거리"는 늘 0이다 —
+            # 경계선을 재려면 1등과 2등의 격차를 봐야 한다(2026-09-21 실측 버그 발견:
+            # 예전 코드는 own_team 거리끼리 빼서 stayed 학생은 항상 margin=0이 나왔고,
+            # 그 아래 "m > 0" 필터가 전원을 걸러내 강제 이동이 한 번도 발동하지 않았음).
+            margin = float(sorted_dists[1] - sorted_dists[0]) if len(sorted_dists) > 1 else float("inf")
             margins.append((i, margin))
             results.append({
                 **s, "opinion_after": opinions_after[i],
@@ -2106,12 +2128,12 @@ async def edu_admin_debate_conclude(request: Request):
         # 임베딩 거리상 가장 설득력 있는 경계 사례를 고르는 것 — 판정 기준(자기 팀
         # 중심과의 거리)은 그대로 두고 문턱값만 조정하는 셈이다.
         if sum(1 for r in results if not r["stayed"]) == 0 and len(results) >= 2:
-            stayed_margins = [(i, m) for i, m in margins if results[i]["stayed"] and m > 0]
+            stayed_margins = [(i, m) for i, m in margins if results[i]["stayed"]]
             if stayed_margins:
                 flip_i = min(stayed_margins, key=lambda x: x[1])[0]
                 s = students[flip_i]
                 own_team = team_by_student[s["id"]]
-                dists_after = np.linalg.norm(centroids - after_vecs[flip_i], axis=1)
+                dists_after = all_dists[flip_i]
                 order = np.argsort(dists_after)
                 own_team_idx = teams.index(own_team)
                 second_nearest_idx = next(int(idx) for idx in order if idx != own_team_idx)
