@@ -438,7 +438,7 @@ def _pipeline_stages() -> list[dict]:
 
     return [
         {
-            "no": 1, "title": "MLOps 인프라 구축",
+            "no": 1, "title": "개발 환경 구축",
             "definition": "Python 환경·실험 추적·프로젝트 구조 등 재현 가능한 개발 기반 마련",
             "role": "이후 모든 실험을 추적·재현 가능하게 만드는 기반. 여기서부터 '왜 이렇게 했는가'를 기록하는 습관이 시작됨",
             "library": "uv(패키지·venv 관리) · MLflow(Tracking, SQLite backend) · tmux(상시 실행)",
@@ -455,8 +455,8 @@ def _pipeline_stages() -> list[dict]:
             ],
         },
         {
-            "no": 3, "title": "sLLM 파인튜닝",
-            "definition": "LoRA로 베이스 모델에 도메인 문체(안전 알림 톤)를 가볍게 학습",
+            "no": 3, "title": "베이스 모델 선정 및 파인튜닝",
+            "definition": "라이선스·한국어 품질·크기를 비교해 Qwen3를 베이스로 선정 후, LoRA로 도메인 문체(안전 알림 톤)를 가볍게 학습",
             "role": "센서 이벤트 → 간결한 한국어 알림 문장으로 바꾸는 능력을 익힘. 위험 판정 자체는 여기서도 LLM에게 안 맡김",
             "library": "Qwen3-4B-Instruct-2507(Apache-2.0) · peft(LoRA r=16) · trl(SFTTrainer) · MLflow",
             "stats": ft_stats,
@@ -494,6 +494,13 @@ def _pipeline_stages() -> list[dict]:
             "role": "GPU 없는/약한 디바이스에서도 실용적 속도가 나오는지 실제 배포 전에 검증",
             "library": "systemd-run(cgroup) · taskset",
             "stats": ["실측: 2코어 tg 7.32 tok/s(8코어 대비 약 3.2배 느림)", "진짜 하드웨어 검증은 아직 — 코어/메모리만 흉내낸 하한선"],
+        },
+        {
+            "no": 8, "title": "운영 인프라 (CI/CD·모니터링)",
+            "definition": "표준 MLOps 4대 갭 — 모델 레지스트리·실험관리·모니터링·데이터 버저닝·CI/CD를 순차적으로 메움",
+            "role": "코드를 푸시하면 자동으로 테스트→배포되고, 서비스 상태는 대시보드로, 어떤 모델이 운영 중인지는 레지스트리로 추적 — 사람이 매번 수동으로 확인·배포하지 않아도 됨",
+            "library": "MLflow Model Registry/Tracking · Prometheus + Grafana · DVC(로컬 원격) · GitHub Actions(self-hosted runner)",
+            "stats": ["CI/CD: push → 테스트~배포 자동 실행(약 27초)", "모니터링: /metrics 엔드포인트 → Prometheus 수집 → Grafana 대시보드"],
         },
     ]
 
