@@ -188,8 +188,13 @@ SOURCES: list[SourceConfig] = [
             "동일인 소유 data.go.kr 계정, CLAUDE.md의 '인프라 분리' 원칙과 별개로 키 재사용만 허용된 "
             "케이스 — 의사결정_로그 참고). 키는 `grib-ai-server`의 "
             "`~/secrets/mlops-edge-lab/education_api_keys.env`(저장소 밖, git 미추적)에 "
-            "`MLOPS_EDU_KOSIS_DESC_KEY`로 있음 — 커넥터 구현 시 이 env var를 로드해서 쓸 것. "
-            "인증키는 이미 있으니 커넥터 코드만 작성하면 바로 착수 가능."
+            "`MLOPS_EDU_KOSIS_DESC_KEY`로 있음. "
+            "2026-09-23: BidRadar 스프레드시트에 이 소스의 endpoint 칸이 비어 있었음(다른 두 소스는 "
+            "채워져 있었는데 이것만 없음) — BidRadar도 이 API는 실제로 호출까지 성공한 적이 없을 "
+            "가능성. KOSIS는 data.go.kr 키 체계와 kosis.kr 자체 openAPI 키 체계가 별개라(문서 조사로 "
+            "확인) 정확한 apis.data.go.kr 엔드포인트를 특정 못 함. 아래 constitutional_court/"
+            "law_terms_kb에서 발견한 IP 화이트리스트 문제까지 겹칠 가능성이 높아 커넥터 구현을 "
+            "보류함 — 엔드포인트 확정 + IP 등록 여부 확인이 먼저 필요."
         ),
         implemented=False,
     ),
@@ -210,7 +215,16 @@ SOURCES: list[SourceConfig] = [
             "data.go.kr 활용신청, 개발단계 자동승인 확인(운영단계는 심의). 2026-09-21: BidRadar 계정의 "
             "인증키를 재사용하기로 사용자 결정(kosis_desc와 동일 배경). "
             "`~/secrets/mlops-edge-lab/education_api_keys.env`에 `MLOPS_EDU_CONSTITUTIONAL_COURT_KEY`로 "
-            "있음 — 커넥터 코드만 작성하면 바로 착수 가능."
+            "있음. 엔드포인트 베이스는 BidRadar 스프레드시트로 확인: "
+            "`https://apis.data.go.kr/9750000/PrecedentInfomationService`. "
+            "2026-09-23: grib-ai-server에서 실제 키로 후보 오퍼레이션 7개를 라이브 테스트함 — "
+            "`getRealmMainPrcdntList`만 다른 오퍼레이션(reasonCode 12 'NO_OPENAPI_SERVICE_ERROR', "
+            "즉 경로 자체가 없음)과 달리 reasonCode 30 'SERVICE_KEY_IS_NOT_REGISTERED_ERROR'를 "
+            "반환함 — 이 오퍼레이션 경로 자체는 실재하지만, 이 서비스키가 등록 안 된 것으로 판정됨. "
+            "law_terms_kb에서 확인한 것과 같은 IP 화이트리스트 문제로 강하게 추정(아래 참고). "
+            "**막힌 지점**: BidRadar가 활용신청 시 등록한 서버 IP가 grib-ai-server(공인 IP "
+            "1.220.120.74, 2026-09-23 확인)와 다를 가능성이 큼 — data.go.kr 활용신청 상세보기에서 "
+            "등록된 IP를 확인하거나, grib-ai-server IP를 추가 등록해야 진행 가능."
         ),
         implemented=False,
     ),
@@ -230,10 +244,18 @@ SOURCES: list[SourceConfig] = [
         notes=(
             "API 유형이 LINK로 표시됨 — 2026-09-21 BidRadar 계정 스프레드시트에서 실제 확인해보니 "
             "호출 주소가 open.law.go.kr(OC 인증키 방식)이었음, 예상대로 law_go_kr과 같은 인증 체계로 "
-            "보임(단, law_go_kr 자체를 이 키로 실제 호출해서 검증한 적은 아직 없음 — 커넥터 구현 시 "
-            "가장 먼저 확인할 것). BidRadar 계정의 키를 재사용하기로 사용자 결정(kosis_desc와 동일 "
-            "배경) — `~/secrets/mlops-edge-lab/education_api_keys.env`에 `MLOPS_EDU_LAW_TERMS_KB_KEY`로 "
-            "있음."
+            "보임. BidRadar 계정의 키를 재사용하기로 사용자 결정(kosis_desc와 동일 배경) — "
+            "`~/secrets/mlops-edge-lab/education_api_keys.env`에 `MLOPS_EDU_LAW_TERMS_KB_KEY`로 있음. "
+            "엔드포인트는 BidRadar 스프레드시트로 확인: `http://www.law.go.kr/DRF/lawSearch.do`. "
+            "2026-09-23: grib-ai-server에서 실제 키로 라이브 호출해봄 — target 파라미터(lstrmAI 등 "
+            "4종 후보) 무엇을 넣어도 전부 동일한 응답: '사용자 정보 검증에 실패하였습니다 — OPEN API "
+            "호출 시 사용자 검증을 위하여 정확한 서버장비의 IP주소 및 도메인주소를 등록해 주세요.' "
+            "law.go.kr의 OC 키는 호출 서버의 IP/도메인을 미리 등록해야 동작하는 화이트리스트 방식임을 "
+            "실측으로 확인함 — target 코드가 맞는지 여부와 무관하게 이 에러가 먼저 막는다. "
+            "**막힌 지점**: BidRadar가 등록한 IP가 grib-ai-server(공인 IP 1.220.120.74, 2026-09-23 "
+            "확인)와 다름. law.go.kr 계정(open.law.go.kr 마이페이지)에서 이 IP를 추가 등록해야 진행 "
+            "가능 — 또는 그립 회사 네트워크의 고정 아웃바운드 IP를 대신 등록해뒀다면 grib-ai-server가 "
+            "그 IP로 나가는지 확인 필요."
         ),
         implemented=False,
     ),
