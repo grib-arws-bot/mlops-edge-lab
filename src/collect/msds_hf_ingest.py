@@ -49,6 +49,7 @@ _TEXT_DIR = _ROOT / "data" / "processed" / "text"
 _RAW_MSDS_DIR = _ROOT / "data" / "raw" / "msds"
 _CATALOG_PATH = _ROOT / "data" / "processed" / "msds_catalog.json"
 _SYNC_STATUS_PATH = _ROOT / "data" / "processed" / "msds_sync_status.json"
+_INGESTED_REVISION_PATH = _ROOT / "data" / "processed" / "msds_ingested_revision.txt"
 
 _HF_DATASET_ID = "Yuyongkim/inconvenience-msds"
 _HF_REVISION = "5db49df655360dc69cc250ecb41058bf464553fa"
@@ -57,6 +58,26 @@ _HF_API_URL = f"https://huggingface.co/api/datasets/{_HF_DATASET_ID}"
 _EXPECTED_SHA256 = "2c342e638e403540076f0e0d13d0018f7671b11747b5a40cb67a5245d13a4227"
 
 _SECTION_ORDER = list(range(1, 17))
+
+_UNSET = object()
+
+
+def current_pinned_revision() -> str:
+    """"지금 실제로 적재돼 있는" 리비전 — 웹의 지금 업데이트 버튼으로 새 리비전을
+    받은 적이 있으면 그 값을, 없으면(최초 상태) 이 파일의 하드코딩된 기본값을
+    돌려준다. 업데이트 후에도 이 소스 파일의 _HF_REVISION 상수 자체는 건드리지
+    않는다(실행 중인 작업이 자기 소스 코드를 고치는 건 사고 원인이 되기 쉽다) —
+    "지금 뭘 갖고 있는지"는 이 상태 파일이 진실이다."""
+    if _INGESTED_REVISION_PATH.exists():
+        rev = _INGESTED_REVISION_PATH.read_text(encoding="utf-8").strip()
+        if rev:
+            return rev
+    return _HF_REVISION
+
+
+def _record_ingested_revision(revision: str) -> None:
+    _INGESTED_REVISION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _INGESTED_REVISION_PATH.write_text(revision, encoding="utf-8")
 
 
 def _safe_name(name: str, max_bytes: int = 80) -> str:
@@ -78,33 +99,43 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def download(dest: Path) -> None:
-    """원본 JSONL을 저장 — 이미 있고 해시가 맞으면 재다운로드 생략(멱등).
+def download(dest: Path, url: str = _UNSET, expected_sha256=_UNSET) -> str:
+    """원본 JSONL을 저장 — 이미 있고 해시가 맞으면 재다운로드 생략(멱등). 실제
+    받은 파일의 sha256을 반환한다(호출부가 "새 리비전을 정확히 이만큼 받았다"를
+    기록할 수 있게).
+
+    url/expected_sha256을 지정하면 그 리비전을 받는다(웹의 "지금 업데이트"가
+    최신 리비전으로 받을 때 씀) — expected_sha256을 모르면(새 리비전이라 아직
+    모름) None을 넘기면 검증을 생략하고 실제 해시를 로그로만 남긴다.
 
     urllib.request로 직접 받아봤더니 882MB 중 128KB만 받고 조용히 끊기는 문제가
     실제로 있었다(2026-09-23 실측 — 예외 없이 스트림이 일찍 끝남, HF의 CDN
     리다이렉트 체인과 urllib의 상호작용 문제로 추정). curl은 같은 URL을 문제없이
     완주했다(55초, 정확히 882,524,767바이트) — 그래서 subprocess로 curl을 그대로
     쓴다. 실패해도 이어받기 가능(-C -)."""
-    if dest.exists() and _sha256(dest) == _EXPECTED_SHA256:
+    url = _HF_URL if url is _UNSET else url
+    expected_sha256 = _EXPECTED_SHA256 if expected_sha256 is _UNSET else expected_sha256
+
+    if dest.exists() and expected_sha256 is not None and _sha256(dest) == expected_sha256:
         print(f"이미 있음(해시 일치) — 다운로드 생략: {dest}")
-        return
+        return expected_sha256
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    print(f"다운로드 시작(curl): {_HF_URL}")
+    print(f"다운로드 시작(curl): {url}")
     subprocess.run(
-        ["curl", "-fL", "-C", "-", "--retry", "3", "-o", str(tmp), _HF_URL],
+        ["curl", "-fL", "-C", "-", "--retry", "3", "-o", str(tmp), url],
         check=True,
     )
     actual = _sha256(tmp)
-    if actual != _EXPECTED_SHA256:
+    if expected_sha256 is not None and actual != expected_sha256:
         tmp.unlink(missing_ok=True)
         raise ValueError(
-            f"해시 불일치 — 예상 {_EXPECTED_SHA256}, 실제 {actual}. "
-            "데이터셋이 갱신됐을 수 있음 — _HF_REVISION/_EXPECTED_SHA256를 huggingface.co에서 재확인할 것."
+            f"해시 불일치 — 예상 {expected_sha256}, 실제 {actual}. "
+            "데이터셋이 갱신됐을 수 있음 — revision/expected_sha256를 huggingface.co에서 재확인할 것."
         )
     tmp.replace(dest)
-    print(f"다운로드 완료·해시 검증됨: {dest}")
+    print(f"다운로드 완료(해시 {'검증됨' if expected_sha256 is not None else '미검증, 실제값 ' + actual}): {dest}")
+    return actual
 
 
 def _format_record(rec: dict) -> str:
@@ -180,9 +211,10 @@ def check_for_updates(write_status: bool = True) -> dict:
 
     호출 실패(네트워크 등)도 조용히 삼키지 않고 status에 남긴다 — healthcheck류
     패턴과 동일(이 프로젝트 전반의 원칙, alerts.log 참고)."""
+    pinned = current_pinned_revision()
     result = {
         "checked_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "pinned_revision": _HF_REVISION,
+        "pinned_revision": pinned,
         "latest_revision": None,
         "up_to_date": None,
         "error": None,
@@ -193,7 +225,7 @@ def check_for_updates(write_status: bool = True) -> dict:
             data = json.loads(resp.read().decode("utf-8"))
         latest = data.get("sha")
         result["latest_revision"] = latest
-        result["up_to_date"] = (latest == _HF_REVISION) if latest else None
+        result["up_to_date"] = (latest == pinned) if latest else None
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
         result["error"] = str(e)
 
@@ -221,6 +253,7 @@ def main() -> None:
         download(jsonl_path)
 
     count = ingest(jsonl_path, limit=args.limit)
+    _record_ingested_revision(_HF_REVISION)
     check_for_updates()
     print(f"완료 — {count}건을 {_TEXT_DIR}에 적재")
 

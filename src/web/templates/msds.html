@@ -27,6 +27,7 @@
     <h1>MSDS 검색</h1>
     <h2 style="margin-bottom:0;">
       물질안전보건자료(KOSHA) {{ catalog_count }}건을 물질 단위로 바로 조회하거나, 산업안전 문서 전체(MSDS 포함)에서 RAG로 검색합니다.
+      <span id="msds-sync-badge">
       {% if sync_status %}
         {% if sync_status.error %}
         <span class="sync-badge unknown">최신본 확인 실패</span>
@@ -38,7 +39,13 @@
         <span class="sync-badge unknown">최신본 확인 안 됨</span>
         {% endif %}
       {% endif %}
+      </span>
     </h2>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button type="button" id="msds-check-updates-btn" style="margin-top:0;" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>최신본 확인</button>
+      <button type="button" id="msds-trigger-update-btn" style="margin-top:0;" {% if not (sync_status and sync_status.up_to_date == false) or update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>지금 업데이트</button>
+      <span id="msds-update-status" class="stat"></span>
+    </div>
   </div>
 </div>
 
@@ -144,6 +151,98 @@ document.getElementById('msds-search-btn').addEventListener('click', async () =>
 
 document.getElementById('msds-query-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') document.getElementById('msds-search-btn').click();
+});
+
+function renderSyncBadge(sync) {
+  const el = document.getElementById('msds-sync-badge');
+  const triggerBtn = document.getElementById('msds-trigger-update-btn');
+  if (!sync) { el.innerHTML = ''; return; }
+  if (sync.error) {
+    el.innerHTML = '<span class="sync-badge unknown">최신본 확인 실패</span>';
+    triggerBtn.disabled = true;
+  } else if (sync.up_to_date === true) {
+    el.innerHTML = `<span class="sync-badge ok">최신본과 일치(${escapeHtml((sync.checked_at || '').split('T')[0])} 확인)</span>`;
+    triggerBtn.disabled = true;
+  } else if (sync.up_to_date === false) {
+    el.innerHTML = '<span class="sync-badge stale">새 버전 있음 — 재수집 검토 필요</span>';
+    triggerBtn.disabled = false;
+  } else {
+    el.innerHTML = '<span class="sync-badge unknown">최신본 확인 안 됨</span>';
+    triggerBtn.disabled = true;
+  }
+}
+
+document.getElementById('msds-check-updates-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('msds-check-updates-btn');
+  const statusEl = document.getElementById('msds-update-status');
+  btn.disabled = true;
+  statusEl.textContent = '↺ 확인 중...';
+  try {
+    const res = await fetch('/api/msds/check-updates', { method: 'POST' });
+    const data = await res.json();
+    renderSyncBadge(data);
+    statusEl.textContent = '';
+  } catch (e) {
+    statusEl.textContent = '확인 중 오류가 발생했습니다.';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+const _msdsUpdateStageLabel = {
+  checking: '최신본 확인 중', downloading: '새 버전 다운로드 중',
+  ingesting: '재적재 중', indexing: '인덱스 재구축 중(GPU, 수십 분 소요될 수 있음)',
+  done: '완료', noop: '이미 최신본', error: '오류',
+};
+
+async function pollMsdsUpdateStatus() {
+  const statusEl = document.getElementById('msds-update-status');
+  const triggerBtn = document.getElementById('msds-trigger-update-btn');
+  const checkBtn = document.getElementById('msds-check-updates-btn');
+  const res = await fetch('/api/msds/update-status');
+  const data = await res.json();
+  const label = _msdsUpdateStageLabel[data.status] || data.status;
+  statusEl.textContent = `↺ ${label}${data.detail ? ' — ' + data.detail : ''}`;
+  if (['checking', 'downloading', 'ingesting', 'indexing'].includes(data.status)) {
+    setTimeout(pollMsdsUpdateStatus, 5000);
+    return;
+  }
+  checkBtn.disabled = false;
+  if (data.status === 'done') {
+    statusEl.textContent = `완료 — ${data.ingested_count || ''}건 반영됨. 새로고침하면 카탈로그·검색에 반영됩니다.`;
+    triggerBtn.disabled = true;
+  } else if (data.status === 'error') {
+    statusEl.textContent = `업데이트 실패 — ${data.detail || ''}`;
+    triggerBtn.disabled = false;
+  } else if (data.status === 'noop') {
+    statusEl.textContent = '이미 최신본이라 업데이트할 게 없습니다.';
+    triggerBtn.disabled = true;
+  }
+}
+
+{% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}
+// 페이지를 새로고침했을 때 다른 사람(또는 이전 시도)이 이미 돌려놓은 업데이트가
+// 진행 중이면, 버튼만 비활성화해두고 끝내지 않고 이어서 폴링한다.
+setTimeout(pollMsdsUpdateStatus, 1000);
+{% endif %}
+
+document.getElementById('msds-trigger-update-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('msds-trigger-update-btn');
+  const checkBtn = document.getElementById('msds-check-updates-btn');
+  const statusEl = document.getElementById('msds-update-status');
+  btn.disabled = true;
+  checkBtn.disabled = true;
+  statusEl.textContent = '↺ 업데이트 시작 중...';
+  try {
+    const res = await fetch('/api/msds/trigger-update', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || '시작 실패'; btn.disabled = false; checkBtn.disabled = false; return; }
+    setTimeout(pollMsdsUpdateStatus, 2000);
+  } catch (e) {
+    statusEl.textContent = '업데이트 시작 중 오류가 발생했습니다.';
+    btn.disabled = false;
+    checkBtn.disabled = false;
+  }
 });
 </script>
 {% endblock %}

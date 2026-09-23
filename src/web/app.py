@@ -45,6 +45,7 @@ from agent.cosmetics_run import run_cosmetics_agent
 from agent.cosmetics_tools import CosmeticsToolContext
 from agent.run import judge_and_actuate, narrate, preview, run_agent, run_agent_composite, to_dict, to_dict_composite
 from agent.tools import ToolContext
+from collect import msds_hf_ingest
 from collect import registry as collect_registry
 from collect.storage import collection_summary
 from rag import query as rag_query
@@ -76,6 +77,8 @@ _SAFETY_META_PATH = _ROOT / "data" / "processed" / "rag_chunks.jsonl"
 _MSDS_CATALOG_PATH = _ROOT / "data" / "processed" / "msds_catalog.json"
 _MSDS_SYNC_STATUS_PATH = _ROOT / "data" / "processed" / "msds_sync_status.json"
 _MSDS_TEXT_DIR = _ROOT / "data" / "processed" / "text"
+_MSDS_UPDATE_JOB_STATUS_PATH = _ROOT / "data" / "processed" / "msds_update_job.json"
+_MSDS_PYTHON_BIN = _ROOT / ".venv" / "bin" / "python"
 
 _state: dict = {}
 
@@ -669,6 +672,7 @@ def msds_page(request: Request):
         "catalog_count": len(_state.get("msds_catalog") or []),
         "index_available": _state.get("safety_index") is not None,
         "sync_status": sync_status,
+        "update_job_status": _msds_update_job_status(),
     })
 
 
@@ -696,6 +700,60 @@ def msds_detail(chem_id: str):
     if not path.exists():
         return JSONResponse({"error": "원문 파일이 없습니다"}, status_code=404)
     return JSONResponse({"entry": entry, "text": path.read_text(encoding="utf-8")})
+
+
+def _msds_update_job_status() -> dict:
+    if not _MSDS_UPDATE_JOB_STATUS_PATH.exists():
+        return {"status": "idle"}
+    try:
+        return json.loads(_MSDS_UPDATE_JOB_STATUS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"status": "idle"}
+
+
+@app.post("/api/msds/check-updates")
+async def msds_check_updates():
+    """"최신본 확인" 버튼 — huggingface.co에 한 번 물어보는 가벼운 호출(수 초)이라
+    바로 동기로 실행하고 결과를 msds_sync_status.json에 남긴다. 무거운 재적재는
+    여기서 하지 않는다(트리거만) — 사용자가 결과를 보고 "지금 업데이트"를 따로
+    눌러야 실제로 돈다."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, msds_hf_ingest.check_for_updates)
+    return JSONResponse(result)
+
+
+@app.get("/api/msds/update-status")
+def msds_update_status():
+    return JSONResponse(_msds_update_job_status())
+
+
+@app.post("/api/msds/trigger-update")
+async def msds_trigger_update():
+    """"지금 업데이트" 버튼 — 새 리비전이 실제로 있을 때만 동작한다(재확인 없이
+    바로 버튼을 눌렀을 가능성 대비, 프론트 비활성화와 별개로 서버에서도 다시
+    확인). 무거운 작업(다운로드+재적재+GPU 인덱스 재구축, 최초 실측 약 20분)이라
+    edu 학습 job과 같은 이유로 systemd-run --scope로 분리한다 — mlops-web 배포로
+    도중에 죽지 않게."""
+    current = _msds_update_job_status()
+    if current.get("status") in ("checking", "downloading", "ingesting", "indexing"):
+        return JSONResponse({"error": "이미 업데이트가 진행 중입니다"}, status_code=409)
+
+    loop = asyncio.get_event_loop()
+    check = await loop.run_in_executor(None, msds_hf_ingest.check_for_updates)
+    if check.get("error"):
+        return JSONResponse({"error": f"최신본 확인 실패: {check['error']}"}, status_code=502)
+    if check.get("up_to_date") is not False:
+        return JSONResponse({"error": "업데이트할 새 버전이 없습니다"}, status_code=409)
+
+    subprocess.Popen(
+        ["systemd-run", "--user", "--scope", "--quiet", "--",
+         str(_MSDS_PYTHON_BIN), "-m", "collect.msds_update_job"],
+        cwd=str(_ROOT),
+        env={**os.environ, "PYTHONPATH": str(_ROOT / "src")},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return JSONResponse({"status": "started", "target_revision": check.get("latest_revision")})
 
 
 _MSDS_SEARCH_SYSTEM_PROMPT = (
