@@ -63,6 +63,18 @@ _TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "generate_coa_draft",
+            "description": "특정 Lot의 QC 측정값·판정을 COA(시험성적서) 양식으로 정리한 초안을 생성한다. 새로 판정하지 않고 이미 저장된 값을 문서로 조립만 한다 — 정식 발급이 아닌 초안이며 QC 담당자 검토·서명이 필요하다.",
+            "parameters": {
+                "type": "object",
+                "properties": {"lot_id": {"type": "string", "description": "COA를 생성할 Lot 번호(예: EXT-20260901-01)"}},
+                "required": ["lot_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "predict_condition",
             "description": "아직 진행하지 않은 새 배치에 대한 권장 운전조건을 추천받는다(과거 이력이 아니라 사전 추천이 필요할 때 사용).",
             "parameters": {
@@ -82,7 +94,9 @@ _SYSTEM_PROMPT = (
     "당신은 화장품 제조 현장의 AI 업무지원 에이전트입니다. 작업자의 질문에 답하기 위해 "
     "필요하면 search_sop(SOP 문서 검색), query_lot(과거에 종료·저장된 생산 Lot 이력 조회), "
     "query_recent_ticks(지금 화면에 보이는 시나리오의 최근 실시간 시점 이력 — '시점 N', "
-    "'방금', '지금까지' 같은 질문에 사용), predict_condition(신규 배치 추천 조건, 과거 이력이 "
+    "'방금', '지금까지' 같은 질문에 사용), generate_coa_draft(특정 Lot의 COA 시험성적서 "
+    "초안 생성 — 이미 저장된 값을 문서로 조립만 함, 새로 판정하지 않음), "
+    "predict_condition(신규 배치 추천 조건, 과거 이력이 "
     "아닌 사전 추천일 때만) 도구를 사용하세요.\n"
     "query_recent_ticks가 돌려준 시점 범위 밖을 물어보면(예: 표시된 것보다 훨씬 이전 시점), "
     "모른다고 하지 말고 '표시된 범위(가장 오래된 시점~최신 시점) 밖이라 알 수 없습니다'라고 "
@@ -94,14 +108,17 @@ _SYSTEM_PROMPT = (
     "먼저 도구를 최소 1회 호출해 근거를 확인한 뒤에만 답하세요. 도구를 하나도 "
     "호출하지 않고 기술적인 내용을 답하는 것은 금지됩니다.\n"
     "1) 먼저 확인: 이 요청이 설비 제어(운전조건 실제 변경), 배치 합격/불합격 등 품질의 "
-    "'최종 판정' 확정, 또는 COA 등 공식 문서 '확정'을 요청하는 것입니까? 그렇다면 당신은 "
-    "직접 판정·확정·실행하지 말고, 곧바로 search_sop으로 'SOP-QC-01 승인 정책'을 검색한 "
-    "뒤 그 내용을 인용하면서 '이 사안은 담당자 승인이 필요합니다'라고 답하세요. 이 규칙은 "
-    "다른 모든 규칙보다 우선합니다.\n"
+    "'최종 판정' 확정, 또는 COA를 정식 발급·확정하는 것입니까?(COA '초안'을 만들어달라는 "
+    "요청은 여기 해당하지 않습니다 — 그건 generate_coa_draft를 바로 호출하세요.) 그렇다면 "
+    "당신은 직접 판정·확정·실행하지 말고, 곧바로 search_sop으로 'SOP-QC-01 승인 정책'을 "
+    "검색한 뒤 그 내용을 인용하면서 '이 사안은 담당자 승인이 필요합니다'라고 답하세요. 이 "
+    "규칙은 다른 모든 규칙보다 우선합니다.\n"
     "2) 위 경우가 아니라면, 도구로 확인한 근거에 없는 내용은 답하지 말고 '자료에서 근거를 "
     "찾지 못했습니다'라고 답하세요.\n"
     "3) predict_condition의 결과는 학습된 AI 모델이 아니라 SOP 기준값 기반 참고용 추천이라는 "
-    "점을 답변에 명시하세요."
+    "점을 답변에 명시하세요.\n"
+    "4) generate_coa_draft의 결과를 보여줄 때는 반드시 '초안이며 QC 담당자 검토·서명이 "
+    "필요하다'는 점을 답변에 명시하세요."
 )
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
@@ -173,6 +190,16 @@ def _run_query_recent_ticks(live_ticks: list[dict]) -> tuple[dict, ToolStep]:
     return result, step
 
 
+def _run_generate_coa_draft(args: dict) -> tuple[dict, ToolStep]:
+    result = tools.generate_coa_draft(lot_id=args.get("lot_id", ""))
+    if "error" in result:
+        summary = result["error"]
+    else:
+        summary = f"{result['lot_id']} COA 초안 생성됨 (판정: {result['판정']}, {result['문서상태']})"
+    step = ToolStep(tool="generate_coa_draft", layer=2, layer_label=_LAYER_LABEL[2], args=args, result_summary=summary, detail=result)
+    return result, step
+
+
 def _run_predict_condition(args: dict) -> tuple[dict, ToolStep]:
     result = tools.predict_condition(process=args.get("process", ""))
     summary = f"{args.get('process', '')} 추천조건 생성(mock, 근거: {result.get('근거_SOP', '-')})"
@@ -223,6 +250,8 @@ def run_cosmetics_agent(
                 tool_result, step = _run_query_lot(args)
             elif fn_name == "query_recent_ticks":
                 tool_result, step = _run_query_recent_ticks(live_ticks)
+            elif fn_name == "generate_coa_draft":
+                tool_result, step = _run_generate_coa_draft(args)
             elif fn_name == "predict_condition":
                 tool_result, step = _run_predict_condition(args)
             elif fn_name == "search_sop":

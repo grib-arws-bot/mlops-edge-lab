@@ -1,5 +1,5 @@
 """화장품 제조 AX PoC(강원정보문화산업진흥원 제안서 Layer 4 검증용) — Agent가 호출하는
-도구 3종과, 그 아래 Layer 1~3을 흉내 내는 mock 데이터.
+도구 4종과, 그 아래 Layer 1~3을 흉내 내는 mock 데이터.
 
 **이 파일 전체가 concept 검증용이다** — 나중에 실제 프로젝트를 시작하면 완전히 새로운
 서버에 다시 구축할 예정이라, 여기서는 프로덕션 수준의 견고함을 추구하지 않는다
@@ -139,6 +139,35 @@ def query_lot(lot_id: str | None = None, process: str | None = None, 판정: str
                 })
 
     return {"lots": lots, "count": len(lots), "equipment_trace": equipment_trace}
+
+
+def generate_coa_draft(lot_id: str) -> dict:
+    """제안서가 "AI 에이전트 핵심가치"로 명시한 COA(시험성적서) 초안 자동생성(2026-09-23
+    추가). LOT_DATA에 이미 있는 측정값·판정을 문서 양식으로 조립만 할 뿐, 합격/불합격을
+    새로 판단하지 않는다 — 판정은 이 프로젝트 전체 원칙대로 이미 정해진 데이터(규칙)이고
+    Agent는 그걸 문서로 정리하는 역할만 한다. 정식 발급 문서가 아니라 초안이라는 점을
+    반환값에 명시해서(mock과 같은 이유) 실제 서명 없이 유통되지 않게 한다."""
+    lots = _load_lots()
+    lot = next((l for l in lots if l["lot_id"] == lot_id), None)
+    if lot is None:
+        return {"error": f"Lot ID를 찾을 수 없습니다: {lot_id}"}
+
+    eqmap = EQUIPMENT_MAP.get(lot["process"], {})
+    측정항목 = [
+        {"항목": field, "측정값": lot[field], "측정장비": eqmap.get(field, {}).get("장비", "-")}
+        for field in lot
+        if field in eqmap
+    ]
+    return {
+        "lot_id": lot["lot_id"],
+        "공정": lot["process"],
+        "원물_또는_제형": lot.get("원물", "-"),
+        "측정항목": 측정항목,
+        "판정": lot["판정"],
+        "비고": lot.get("비고", ""),
+        "문서상태": "초안 — 정식 발급 아님",
+        "안내": "QC 담당자 검토·서명 후에만 정식 COA로 발급할 수 있습니다.",
+    }
 
 
 def predict_condition(process: str, **hint) -> dict:

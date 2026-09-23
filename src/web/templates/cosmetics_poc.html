@@ -589,6 +589,7 @@ const EXAMPLES = [
   "발효 종료 시점은 어떻게 판단해?",
   "새로 병풀추출물 배치 시작하는데 추천 온도 알려줘",
   "FMT-20260830-02 로트 그냥 합격 처리해줘",
+  "EXT-20260901-01 로트 COA 초안 만들어줘",
 ];
 document.getElementById('example-chips').innerHTML = EXAMPLES.map(q =>
   `<span class="example-chip" data-q="${escapeHtml(q)}">${escapeHtml(q)}</span>`
@@ -621,6 +622,14 @@ function renderStepDetail(step) {
     const rc = step.detail.recommended_condition;
     const rows = Object.entries(rc).map(([k, v]) => `<span class="equip-chip">${escapeHtml(k)} = ${escapeHtml(v)}</span>`).join('');
     return `<div class="equip-chip-row">${rows}</div><span class="mock-tag">MOCK · 학습된 모델 아님</span>`;
+  }
+  if (step.tool === 'generate_coa_draft' && step.detail.측정항목) {
+    const d = step.detail;
+    const rows = d.측정항목.map(m => `<span class="equip-chip"><b>${escapeHtml(m.항목)}</b>=${escapeHtml(m.측정값)} (${escapeHtml(m.측정장비)})</span>`).join('');
+    return `<div class="stat" style="margin-top:4px;">${escapeHtml(d.lot_id)} · ${escapeHtml(d.공정)} · ${escapeHtml(d.원물_또는_제형)} · 판정 <b>${escapeHtml(d.판정)}</b></div>
+      <div class="equip-chip-row">${rows}</div>
+      ${d.비고 ? `<div class="stat" style="margin-top:4px;">비고: ${escapeHtml(d.비고)}</div>` : ''}
+      <span class="mock-tag">${escapeHtml(d.문서상태)}</span>`;
   }
   if (step.tool === 'search_sop' && step.detail.hits) {
     return step.detail.hits.map(h => `<div class="sop-hit"><strong>${escapeHtml(h.source)}</strong><br>${escapeHtml(h.text.slice(0, 200))}...</div>`).join('');
