@@ -323,7 +323,12 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="MLOps-Edge-Lab 데모", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+# 원래 "/static"이었는데 "/assets"로 바꿨다(2026-09-24) — Evidently 셀프호스팅 UI를
+# 같은 외부 포트(28081) 밑에 붙이면서, Evidently 프론트엔드가 절대경로로 요청하는
+# "/static/..."과 정확히 겹쳐서(둘 다 "/static" 마운트) 양보할 수 없는 충돌이 났다.
+# Evidently 쪽은 subpath 설정 자체를 지원하지 않아 바꿀 수 없어서, 우리 쪽 경로를
+# 양보했다(의사결정_로그 127번).
+app.mount("/assets", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_HERE / "templates"))
 
 # 표준 MLOps 갭 중 "운영 모니터링" — Prometheus 클라이언트로 지표를 노출만 하고,

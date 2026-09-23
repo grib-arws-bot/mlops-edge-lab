@@ -43,7 +43,7 @@ const DECK_PAGE_COUNT = {{ page_count }};
 let deckPage = 1;
 
 function deckImgUrl(n) {
-  return '/static/deck_pages/page_' + String(n).padStart(3, '0') + '.png';
+  return '/assets/deck_pages/page_' + String(n).padStart(3, '0') + '.png';
 }
 
 function renderDeckPage() {
