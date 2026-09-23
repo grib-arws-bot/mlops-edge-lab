@@ -20,6 +20,16 @@
   .hit-no { color: var(--danger); font-weight: 700; }
   .n-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; background: rgba(139,147,163,0.15); color: var(--muted); font-size: 0.76rem; margin-left: 8px; }
   .caveat-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; background: rgba(210,153,34,0.15); color: var(--llm); font-size: 0.72rem; margin-left: 6px; border: 1px solid var(--llm); }
+  .drift-badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 0.78rem; font-weight: 700; margin-left: 8px; }
+  .drift-stable { background: rgba(63,185,80,0.15); color: var(--normal); border: 1px solid var(--normal); }
+  .drift-moderate { background: rgba(210,153,34,0.15); color: var(--llm); border: 1px solid var(--llm); }
+  .drift-drift { background: rgba(219,68,68,0.15); color: var(--danger); border: 1px solid var(--danger); }
+  .drift-stat-row { display: flex; gap: 24px; flex-wrap: wrap; margin: 10px 0; }
+  .drift-stat { }
+  .drift-stat .label { font-size: 0.76rem; color: var(--muted); }
+  .drift-stat .value { font-size: 1.3rem; font-weight: 700; }
+  #rag-drift-rollback-btn { background: var(--danger); border-color: var(--danger); }
+  #rag-drift-result { margin-top: 8px; font-size: 0.85rem; }
 </style>
 
 <div class="page-header">
@@ -77,6 +87,76 @@
       {% endif %}
     </div>
   </div>
+
+  {% if svc.key == 'safety' %}
+  <div class="card" style="margin-top:16px;" id="rag-drift-card">
+    <strong>검색 품질 드리프트</strong>
+    <div class="why">
+      골든셋 채점 시점(reference)의 top-1 유사도 분포와 실서비스 쿼리(MSDS 검색·산업안전 통합관제·Agent SOP 검색)의 최근 분포(current)를
+      <a href="https://github.com/evidentlyai/evidently" target="_blank" rel="noopener">Evidently</a>로 비교한 PSI(Population Stability Index)입니다.
+      판정(&lt;0.1 안정 / 0.1~0.25 중간 / &gt;0.25 드리프트)은 코드 규칙이 정하고, 되돌리기(Rollback)는 사람이 아래 버튼을 눌러야만 실행됩니다.
+    </div>
+    <div id="rag-drift-body"></div>
+  </div>
+  <script>window.__ragDriftInitial = {{ svc.rag_drift | tojson }};</script>
+  {% endif %}
 </div>
 {% endfor %}
+
+<script>
+function renderRagDrift(d) {
+  const body = document.getElementById('rag-drift-body');
+  if (!body) return;
+  if (d.status === 'no_reference' || d.status === 'unavailable' || d.status === 'error') {
+    body.innerHTML = `<div class="stat" style="margin-top:10px;">${d.message}</div>`;
+    return;
+  }
+  if (d.status === 'insufficient_data') {
+    body.innerHTML = `<div class="stat" style="margin-top:10px;">아직 실측할 만큼 쿼리가 쌓이지 않았습니다 — 현재 ${d.n_current}건 / 최소 ${d.min_required}건 필요. (기준 분포 ${d.n_reference}건은 확보됨)</div>`;
+    return;
+  }
+  const badgeClass = d.status === 'stable' ? 'drift-stable' : (d.status === 'moderate' ? 'drift-moderate' : 'drift-drift');
+  const badgeLabel = d.status === 'stable' ? '정상' : (d.status === 'moderate' ? '중간(주의)' : '드리프트');
+  body.innerHTML = `
+    <span class="drift-badge ${badgeClass}">${badgeLabel}</span>
+    <div class="drift-stat-row">
+      <div class="drift-stat"><div class="label">PSI</div><div class="value">${d.psi}</div></div>
+      <div class="drift-stat"><div class="label">기준(reference) 평균</div><div class="value">${d.reference_mean}</div></div>
+      <div class="drift-stat"><div class="label">현재(current) 평균</div><div class="value">${d.current_mean}</div></div>
+      <div class="drift-stat"><div class="label">표본 수</div><div class="value">${d.n_reference} / ${d.n_current}</div></div>
+    </div>
+    <div class="stat">확인 시각: ${d.checked_at || ''}</div>
+    ${d.status === 'drift' ? '<button type="button" id="rag-drift-rollback-btn" style="margin-top:10px;">이전 모델로 되돌리기</button>' : ''}
+    <div id="rag-drift-result"></div>
+  `;
+  const btn = document.getElementById('rag-drift-rollback-btn');
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      if (!confirm('산업안전 sLLM(toy-sensor-lora) Production 버전을 직전 버전으로 되돌립니다. 계속하시겠습니까?')) return;
+      btn.disabled = true;
+      const resultEl = document.getElementById('rag-drift-result');
+      resultEl.textContent = '↺ 되돌리는 중...';
+      try {
+        const res = await fetch('/api/rag-drift/rollback', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          resultEl.innerHTML = `<span style="color:var(--normal);">✓ v${data.rolled_back_from} → v${data.rolled_back_to}로 되돌렸습니다.</span>`;
+        } else {
+          resultEl.innerHTML = `<span style="color:var(--danger);">${data.message || '되돌리기 실패'}</span>`;
+        }
+      } catch (e) {
+        resultEl.innerHTML = '<span style="color:var(--danger);">되돌리기 중 오류가 발생했습니다.</span>';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+}
+
+if (window.__ragDriftInitial) {
+  // 서버 렌더 시점에 이미 계산해둔 값을 그대로 쓴다 — /quality 로드 때마다 다시
+  // fetch할 필요 없음(다른 카드들도 서버사이드 렌더만 함, 같은 원칙).
+  renderRagDrift(window.__ragDriftInitial);
+}
+</script>
 {% endblock %}

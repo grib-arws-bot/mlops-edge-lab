@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import faiss
@@ -23,6 +24,7 @@ from rag import query
 _ROOT = Path(__file__).resolve().parents[2]
 _GOLDEN_SET_PATH = _ROOT / "data" / "processed" / "safety_golden_set.jsonl"
 _INDEX_PATH = _ROOT / "data" / "processed" / "rag_index.faiss"
+_SCORE_REFERENCE_PATH = _ROOT / "data" / "processed" / "retrieval_score_reference.json"
 
 os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 
@@ -30,6 +32,26 @@ os.environ.setdefault("MLFLOW_TRACKING_URI", "http://127.0.0.1:8082/mlflow")
 def _load_golden_set(path: Path = _GOLDEN_SET_PATH) -> list[dict]:
     with path.open(encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def write_score_reference(rows: list[dict], path: Path = _SCORE_REFERENCE_PATH) -> dict | None:
+    """골든셋 채점 시점의 top-1 유사도 분포를 드리프트 감지(rag/drift_check.py)용
+    "기준(reference) 분포"로 저장한다 — 이 프로젝트에 RAG 검색 품질의 "정상 시점"을
+    달리 정의해둔 데이터가 없어서, 이미 사람이 검수한 골든셋으로 처음 채점한 이
+    순간을 기준으로 삼는다(의사결정_로그 124번). 골든셋이 7문항뿐이라 통계적으로
+    두텁지 않다는 한계를 그대로 안고 간다 — 표본을 부풀려 만들지 않는다."""
+    scores = [r["top1_score"] for r in rows if r.get("top1_score") is not None]
+    if not scores:
+        return None
+    reference = {
+        "top1_scores": scores,
+        "n": len(scores),
+        "mean": sum(scores) / len(scores),
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": "safety_golden_set.jsonl — evaluate_retrieval_safety.run_eval() 최초 채점 시점의 top-1 유사도",
+    }
+    path.write_text(json.dumps(reference, ensure_ascii=False, indent=2), encoding="utf-8")
+    return reference
 
 
 def run_eval(golden_set_path: Path = _GOLDEN_SET_PATH, top_k: int = 4) -> dict:
@@ -47,9 +69,10 @@ def run_eval(golden_set_path: Path = _GOLDEN_SET_PATH, top_k: int = 4) -> dict:
         hit_sources = [h["source"] for h, _ in hits]
         hit = ex["expected_source"] in hit_sources
         rank = hit_sources.index(ex["expected_source"]) + 1 if hit else None
+        top1_score = hits[0][1] if hits else None
         rows.append({
             "question": ex["question"], "expected_source": ex["expected_source"],
-            "hit": hit, "rank": rank, "retrieved_sources": hit_sources,
+            "hit": hit, "rank": rank, "retrieved_sources": hit_sources, "top1_score": top1_score,
         })
         mark = f"O (rank {rank})" if hit else "X"
         print(f"[{mark}] {ex['question']}")
@@ -68,6 +91,12 @@ def run_eval(golden_set_path: Path = _GOLDEN_SET_PATH, top_k: int = 4) -> dict:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         mlflow.log_artifact(str(out_path))
+
+        reference = write_score_reference(rows)
+        if reference:
+            mlflow.log_metric("reference_top1_score_mean", reference["mean"])
+            mlflow.log_artifact(str(_SCORE_REFERENCE_PATH))
+            print(f"기준(reference) 분포 저장: {_SCORE_REFERENCE_PATH} (n={reference['n']}, mean={reference['mean']:.3f})")
 
     return {"hit_rate": hit_rate, "rows": rows}
 

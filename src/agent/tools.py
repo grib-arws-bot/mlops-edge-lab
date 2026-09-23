@@ -53,7 +53,9 @@ class ToolContext:
 def search_guidelines(ctx: ToolContext, query: str, top_k: int = 3) -> list[dict]:
     """로드맵 5번 RAG 검색을 도구로 노출. LLM이 검색 여부·검색어를 스스로 판단해 호출한다."""
     ctx._ensure_rag_loaded()
-    hits = retrieve(query, ctx.embed_model, ctx.index, ctx.meta, top_k=top_k)
+    # log=True — 드리프트 감지(rag/drift_check.py)용 실서비스 쿼리 로그, 의사결정_로그 124번.
+    # /simulate·/control-room 양쪽 다 이 함수를 거쳐 Agent가 SOP를 검색한다.
+    hits = retrieve(query, ctx.embed_model, ctx.index, ctx.meta, top_k=top_k, log=True)
     return [{"source": h["source"], "text": h["text"][:300]} for h, score in hits]
 
 

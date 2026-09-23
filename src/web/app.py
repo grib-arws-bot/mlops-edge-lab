@@ -52,6 +52,17 @@ from rag import query as rag_query
 from rag import query_edu
 from rag.chunk import chunk_text
 from sensors import CATEGORIES, LOCS, SEVERITY_RATIO, VALUE_CEILING, is_lower_is_worse, substance_lookup
+from train import rollback as rag_rollback
+
+try:
+    # evidently는 이 프로젝트 관례(의사결정_로그 90번)대로 `uv pip install`로 애드혹
+    # 추가한 의존성 — import 실패(미설치·버전 문제 등)가 나머지 웹앱 전체를 죽이면
+    # 안 되므로 guard해서, 실패하면 /quality의 드리프트 섹션만 "불러오지 못함"으로
+    # 표시하고 나머지 페이지는 그대로 뜬다.
+    from rag import drift_check
+except Exception as _drift_check_import_exc:  # noqa: BLE001
+    drift_check = None
+    print(f"[startup] rag.drift_check 로드 실패(evidently 미설치 등): {_drift_check_import_exc}")
 from web.parsing import (
     balanced_cluster_assignment as _balanced_cluster_assignment,
     dedupe_requirements as _dedupe_requirements,
@@ -614,6 +625,21 @@ def _finetune_quality(path: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _rag_drift_summary() -> dict:
+    """산업안전 RAG 검색 품질 드리프트 — rag/drift_check.py 실행 결과를 그대로
+    반환한다(의사결정_로그 124번). evidently 로드에 실패한 경우에도 /quality 페이지
+    자체는 떠야 하므로, 여기서도 한 번 더 방어한다(app.py 상단 import guard와 이중)."""
+    if drift_check is None:
+        return {
+            "status": "unavailable",
+            "message": "드리프트 감지 모듈을 불러오지 못했습니다(evidently 미설치 등) — 서버 로그 확인 필요.",
+        }
+    try:
+        return drift_check.check_drift()
+    except Exception as exc:  # noqa: BLE001 — 계산 실패가 /quality 페이지 자체를 죽이면 안 됨
+        return {"status": "error", "message": f"드리프트 계산 중 오류: {exc}"}
+
+
 def _quality_eval_summary() -> dict:
     """품질 평가 파일럿(98·99·104번) 결과를 서비스(도메인)별로 묶어서 보여준다 —
     처음엔 AI튜터에만 만들었다가, "산업안전도 골든셋이 있어야 하지 않나" 지적으로
@@ -626,6 +652,7 @@ def _quality_eval_summary() -> dict:
                 "key": "safety", "name": "산업안전 Agent",
                 "rag_note": "임베딩 단독 검색(하이브리드 없음) — 실제 안전문서 738건 코퍼스",
                 "rag": _rag_quality_safety(),
+                "rag_drift": _rag_drift_summary(),
                 "finetune": _finetune_quality(_SAFETY_FINETUNE_COMPARISON_PATH),
                 "finetune_note": "toy-sensor-lora — 학습 데이터가 템플릿 합성이라(21번) 절대 수치는 품질 지표가 아니라 파이프라인 동작 증거에 가깝습니다.",
             },
@@ -643,6 +670,24 @@ def _quality_eval_summary() -> dict:
 @app.get("/quality", response_class=HTMLResponse)
 def quality(request: Request):
     return templates.TemplateResponse(request, "quality.html", _quality_eval_summary())
+
+
+@app.get("/api/rag-drift/check")
+def rag_drift_check():
+    """/quality 페이지가 로드 시 이미 이 값을 받지만, 새로고침 없이 "다시 확인"
+    버튼으로 최신 값을 다시 계산해볼 수 있게 별도 엔드포인트로도 노출한다."""
+    return JSONResponse(_rag_drift_summary())
+
+
+@app.post("/api/rag-drift/rollback")
+async def rag_drift_rollback():
+    """산업안전 sLLM(toy-sensor-lora) Production 버전을 직전 Archived 버전으로
+    되돌린다. **이 핸들러가 사람 승인이 일어나는 유일한 지점이다** — 드리프트 감지
+    코드(rag/drift_check.py)는 이 함수를 호출하지 않고, 프론트(quality.html)도
+    사람이 확인 팝업(confirm())을 눌러야만 이 엔드포인트로 POST를 보낸다. 자동
+    트리거 경로는 어디에도 없다."""
+    result = rag_rollback.rollback_to_previous()
+    return JSONResponse(result, status_code=200 if result.get("success") else 409)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -841,6 +886,7 @@ async def msds_search(request: Request):
     def _run():
         hits = rag_query.retrieve(
             query, embed_model, index, meta, top_k=8, source_filter=_msds_source_filter(scope),
+            log=True,  # 드리프트 감지(rag/drift_check.py)용 실서비스 쿼리 로그 — 의사결정_로그 124번
         )
         if not hits:
             return hits, None

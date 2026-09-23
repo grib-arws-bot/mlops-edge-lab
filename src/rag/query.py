@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import faiss
@@ -22,6 +24,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 _INDEX_PATH = _ROOT / "data" / "processed" / "rag_index.faiss"
 _META_PATH = _ROOT / "data" / "processed" / "rag_chunks.jsonl"
 _GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
+
+_QUERY_LOG_PATH = _ROOT / "data" / "processed" / "retrieval_query_log.jsonl"
+_QUERY_LOG_LOCK = threading.Lock()
+"""드리프트 감지(rag/drift_check.py)용 "현재(current) 분포" 출처 — 실서비스 요청마다
+top-1 유사도만 가볍게 남긴다. 쿼리 원문은 남기지 않는다(길이만) — 드리프트 판단엔 점수
+분포면 충분하고, 사용자 입력을 그대로 누적 저장할 이유가 없다(의사결정_로그 124번)."""
 
 _TOP_K = 4
 _FETCH_K_WITH_FILTER = 200
@@ -45,21 +53,44 @@ def load_meta() -> list[dict]:
     return [json.loads(line) for line in text.split("\n") if line.strip()]
 
 
+def _log_query(question: str, hits: list[tuple[dict, float]]) -> None:
+    """실서비스 검색 1건의 top-1 유사도를 JSONL에 append. 로깅 실패가 검색 응답 자체를
+    막으면 안 되므로 예외는 조용히 삼킨다(경로가 없거나 디스크 문제여도 서비스는 계속)."""
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "top1_score": float(hits[0][1]) if hits else None,
+        "query_len": len(question),
+    }
+    try:
+        with _QUERY_LOG_LOCK, _QUERY_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"[rag.query] 쿼리 로그 기록 실패(무시하고 계속): {exc}")
+
+
 def retrieve(
     question: str, embed_model: SentenceTransformer, index, meta: list[dict], top_k: int = _TOP_K,
-    source_filter=None,
+    source_filter=None, log: bool = False,
 ):
     """source_filter(선택): meta 항목 하나(dict)를 받아 True/False를 돌려주는 함수
     — 예: `lambda m: m["source"].startswith("msds_")`. 지정하면 top_k보다 훨씬 많이
     가져온 뒤(_FETCH_K_WITH_FILTER) 걸러서 top_k개로 자른다 — 필터 없이 top_k만
-    가져오면 원하는 소스의 청크가 그 안에 하나도 없을 수 있다."""
+    가져오면 원하는 소스의 청크가 그 안에 하나도 없을 수 있다.
+
+    log(선택, 기본 False): True면 top-1 유사도를 _QUERY_LOG_PATH에 남긴다 — 기본값을
+    끄는 이유는 이 함수를 호출하는 곳이 이미 여럿(골든셋 평가, 화장품 PoC 등)이라
+    하위 호환을 깨지 않으면서 "실서비스 사용자 질의"에서만 선택적으로 켜기 위함
+    (산업안전 도메인의 MSDS 검색·Agent SOP 검색 호출부에서만 log=True로 켬)."""
     q_vec = embed_model.encode([f"query: {question}"], normalize_embeddings=True)
     fetch_k = _FETCH_K_WITH_FILTER if source_filter is not None else top_k
     scores, idxs = index.search(np.asarray(q_vec, dtype="float32"), min(fetch_k, index.ntotal))
     hits = [(meta[i], float(s)) for i, s in zip(idxs[0], scores[0]) if i != -1]
     if source_filter is not None:
         hits = [h for h in hits if source_filter(h[0])]
-    return hits[:top_k]
+    result = hits[:top_k]
+    if log:
+        _log_query(question, result)
+    return result
 
 
 def answer(question: str, embed_model: SentenceTransformer, index, meta: list[dict], llm: Llama) -> str:
