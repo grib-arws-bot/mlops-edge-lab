@@ -110,7 +110,7 @@
 </div>
 
 <div class="card">
-  <strong>Layer 4에 직접 질문하기</strong>
+  <strong>온디맨드 대화형 에이전트</strong>
   <div class="why">시나리오와 별개로, 같은 AI Agent(sLLM)에게 자유롭게 질문할 수 있습니다. Agent가 SOP 검색 / Lot 이력 조회 / 추천조건(mock) / 최근 실시간 이력 도구를 스스로 판단해 호출합니다. 실시간 이력은 화면에 보이는 최근 시점까지만 조회됩니다.</div>
   <div class="example-chips" id="example-chips"></div>
   <input type="text" id="question-input" placeholder="예: EXT-20260903-02 로트는 왜 불합격이야?" />
@@ -583,7 +583,7 @@ document.getElementById('normalize-btn').addEventListener('click', () => setMode
 document.getElementById('reset-btn').addEventListener('click', resetScenario);
 resetScenario();
 
-// ---- Layer 4에 직접 질문하기 (자유 질의) ----
+// ---- 온디맨드 대화형 에이전트 (Layer 4 자유 질의) ----
 const EXAMPLES = [
   "EXT-20260903-02 로트는 왜 불합격이야?",
   "발효 종료 시점은 어떻게 판단해?",
