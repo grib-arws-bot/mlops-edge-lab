@@ -141,30 +141,64 @@ def query_lot(lot_id: str | None = None, process: str | None = None, 판정: str
     return {"lots": lots, "count": len(lots), "equipment_trace": equipment_trace}
 
 
-def generate_coa_draft(lot_id: str) -> dict:
+def generate_coa_draft(lot_id: str, live_ticks: list[dict] | None = None) -> dict:
     """제안서가 "AI 에이전트 핵심가치"로 명시한 COA(시험성적서) 초안 자동생성(2026-09-23
     추가). LOT_DATA에 이미 있는 측정값·판정을 문서 양식으로 조립만 할 뿐, 합격/불합격을
     새로 판단하지 않는다 — 판정은 이 프로젝트 전체 원칙대로 이미 정해진 데이터(규칙)이고
     Agent는 그걸 문서로 정리하는 역할만 한다. 정식 발급 문서가 아니라 초안이라는 점을
-    반환값에 명시해서(mock과 같은 이유) 실제 서명 없이 유통되지 않게 한다."""
+    반환값에 명시해서(mock과 같은 이유) 실제 서명 없이 유통되지 않게 한다.
+
+    **2026-09-24 확장**: 시나리오 데모(자동 시뮬레이션)가 만드는 lot_id는 LOT_DATA에 없는
+    라이브 값(예: FMT-20260920-01)이라, lot_id를 못 찾으면 live_ticks(query_recent_ticks와
+    같은 형태)의 최신 시점 값으로 COA를 조립하는 대체 경로를 탄다. 이때도 판정은 프론트가
+    "이상 없이 종료됐다"고 주장하는 걸 그대로 믿지 않고, 이미 SOP 판정에 쓰고 있는
+    `_SOP_RANGES`의 DO 최소 기준을 여기서도 다시 적용해 직접 판정한다 — 자유 질의로
+    호출됐을 때도(예: 이상 상태에서 COA를 물어봐도) 같은 규칙으로 정직하게 답하기 위함."""
     lots = _load_lots()
     lot = next((l for l in lots if l["lot_id"] == lot_id), None)
-    if lot is None:
+    if lot is not None:
+        eqmap = EQUIPMENT_MAP.get(lot["process"], {})
+        측정항목 = [
+            {"항목": field, "측정값": lot[field], "측정장비": eqmap.get(field, {}).get("장비", "-")}
+            for field in lot
+            if field in eqmap
+        ]
+        return {
+            "lot_id": lot["lot_id"],
+            "공정": lot["process"],
+            "원물_또는_제형": lot.get("원물", "-"),
+            "측정항목": 측정항목,
+            "판정": lot["판정"],
+            "비고": lot.get("비고", ""),
+            "문서상태": "초안 — 정식 발급 아님",
+            "안내": "QC 담당자 검토·서명 후에만 정식 COA로 발급할 수 있습니다.",
+        }
+
+    if not live_ticks:
         return {"error": f"Lot ID를 찾을 수 없습니다: {lot_id}"}
 
-    eqmap = EQUIPMENT_MAP.get(lot["process"], {})
+    latest = live_ticks[0]
+    process = "미생물 발효"
+    eqmap = EQUIPMENT_MAP.get(process, {})
     측정항목 = [
-        {"항목": field, "측정값": lot[field], "측정장비": eqmap.get(field, {}).get("장비", "-")}
-        for field in lot
-        if field in eqmap
+        {"항목": field, "측정값": latest[field], "측정장비": eqmap.get(field, {}).get("장비", "-")}
+        for field in eqmap
+        if field in latest
     ]
+    do_min, _ = _SOP_RANGES[process]["DO_최소_pct"]
+    do_now = latest.get("DO_평균_pct")
+    if do_now is not None and do_now < do_min:
+        판정, 비고 = "재작업", f"발효 종료 시점 DO {do_now}%가 SOP 최소 기준({do_min}%) 미만 — 재작업 대상."
+    else:
+        판정, 비고 = "합격", "실시간 시나리오 최종 시점 값 기준 자동 조립(별도 QC 재시험 전제)."
+
     return {
-        "lot_id": lot["lot_id"],
-        "공정": lot["process"],
-        "원물_또는_제형": lot.get("원물", "-"),
+        "lot_id": lot_id,
+        "공정": process,
+        "원물_또는_제형": "-",
         "측정항목": 측정항목,
-        "판정": lot["판정"],
-        "비고": lot.get("비고", ""),
+        "판정": 판정,
+        "비고": 비고,
         "문서상태": "초안 — 정식 발급 아님",
         "안내": "QC 담당자 검토·서명 후에만 정식 COA로 발급할 수 있습니다.",
     }

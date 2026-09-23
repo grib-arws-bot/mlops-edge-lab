@@ -64,7 +64,7 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "generate_coa_draft",
-            "description": "특정 Lot의 QC 측정값·판정을 COA(시험성적서) 양식으로 정리한 초안을 생성한다. 새로 판정하지 않고 이미 저장된 값을 문서로 조립만 한다 — 정식 발급이 아닌 초안이며 QC 담당자 검토·서명이 필요하다.",
+            "description": "특정 Lot의 QC 측정값·판정을 COA(시험성적서) 양식으로 정리한 초안을 생성한다. 저장된 과거 Lot이면 이미 저장된 값을 그대로 조립하고, 지금 화면에 보이는 실시간 시나리오의 lot_id면 최근 실시간 이력(query_recent_ticks와 같은 데이터)을 근거로 SOP 기준에 따라 판정까지 함께 조립한다 — 정식 발급이 아닌 초안이며 QC 담당자 검토·서명이 필요하다.",
             "parameters": {
                 "type": "object",
                 "properties": {"lot_id": {"type": "string", "description": "COA를 생성할 Lot 번호(예: EXT-20260901-01)"}},
@@ -190,8 +190,8 @@ def _run_query_recent_ticks(live_ticks: list[dict]) -> tuple[dict, ToolStep]:
     return result, step
 
 
-def _run_generate_coa_draft(args: dict) -> tuple[dict, ToolStep]:
-    result = tools.generate_coa_draft(lot_id=args.get("lot_id", ""))
+def _run_generate_coa_draft(args: dict, live_ticks: list[dict] | None) -> tuple[dict, ToolStep]:
+    result = tools.generate_coa_draft(lot_id=args.get("lot_id", ""), live_ticks=live_ticks)
     if "error" in result:
         summary = result["error"]
     else:
@@ -251,7 +251,7 @@ def run_cosmetics_agent(
             elif fn_name == "query_recent_ticks":
                 tool_result, step = _run_query_recent_ticks(live_ticks)
             elif fn_name == "generate_coa_draft":
-                tool_result, step = _run_generate_coa_draft(args)
+                tool_result, step = _run_generate_coa_draft(args, live_ticks)
             elif fn_name == "predict_condition":
                 tool_result, step = _run_predict_condition(args)
             elif fn_name == "search_sop":
