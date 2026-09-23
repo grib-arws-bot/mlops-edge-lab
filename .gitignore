@@ -4,6 +4,9 @@
 experiments/
 mlruns/
 mlflow/
+# Evidently 셀프호스팅 UI 워크스페이스(스냅샷 이력) — MLflow의 mlruns/와 같은 이유로
+# 서버 로컬 런타임 산출물, git 추적 대상 아님(의사결정_로그 126번).
+evidently_workspace/
 llama.cpp/
 *.gguf
 .dvc/cache

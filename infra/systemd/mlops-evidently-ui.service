@@ -1,0 +1,17 @@
+[Unit]
+Description=MLOps-Edge-Lab Evidently self-hosted UI (data drift dashboard)
+After=network.target
+
+[Service]
+WorkingDirectory=%h/mlops-edge-lab
+# 8086(내부)→28086(외부) 배정 — 원래 8085를 쓰려 했으나(전략.md 5절 표에 아직 반영 전),
+# 실측(ss -tlnp)해보니 mlops-web이 nginx 뒤 내부 포트로 이미 8085를 쓰고 있어서(의사결정_로그
+# 113번) 다음 번호인 8086으로 배정을 바꿨다(의사결정_로그 126번). workspace 경로는
+# rag/drift_check.py의 _EVIDENTLY_WORKSPACE_PATH(~/mlops-edge-lab/evidently_workspace)와
+# 반드시 같아야 둘이 같은 이력을 본다.
+ExecStart=%h/mlops-edge-lab/.venv/bin/python -m evidently.cli ui --host 127.0.0.1 --port 8086 --workspace %h/mlops-edge-lab/evidently_workspace
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

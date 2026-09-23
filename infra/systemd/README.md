@@ -11,9 +11,27 @@ tmux는 사람이 그 세션에 실수로 키를 잘못 치면(예: `exit`, `Ctr
 mkdir -p ~/.config/systemd/user
 cp infra/systemd/*.service infra/systemd/*.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now mlops-web mlops-mlflow mlops-actions-runner
+systemctl --user enable --now mlops-web mlops-mlflow mlops-actions-runner mlops-evidently-ui
 systemctl --user enable --now mlops-healthcheck.timer
 ```
+
+## Evidently 셀프호스팅 UI (2026-09-23, 의사결정_로그 126번)
+
+`mlops-evidently-ui`는 evidently 패키지에 내장된 대시보드 서버(`python -m evidently.cli ui`)를
+그대로 띄운다 — Evidently Cloud(외부 SaaS) 계정 없이, `rag/drift_check.py`가
+`record_to_workspace=True`로 호출될 때마다 같은 로컬 워크스페이스(`~/mlops-edge-lab/evidently_workspace`)에
+쌓는 Report(Snapshot) 이력을 이 UI가 그대로 읽어서 보여준다.
+
+- **포트**: 8086(내부)→28086(외부). 원래 다음 빈 번호라고 생각했던 8085는 실측(`ss -tlnp`)해보니
+  `mlops-web`이 nginx 뒤 내부 포트로 이미 쓰고 있었다(2026-09-21, 위 "nginx 리버스 프록시" 절 참고) —
+  이 README가 이미 경고했던 "새 포트는 반드시 `ss -tlnp`로 먼저 확인" 원칙을 여기서도 그대로 지켜서
+  8086으로 바꿨다.
+- 다른 서비스들과 달리 **nginx 뒤에 물리지 않고 직접 127.0.0.1:8086으로 바인딩**한다 — Evidently UI
+  자체가 이 프로젝트 전용 툴이라 `/quality`·`/control-room`처럼 nginx의 8081 서브패스에 묶을
+  필요가 없고, 과거 Prometheus/Grafana처럼 독자 포트(28086)로 직접 포워딩받는 설계다.
+- **28086 외부 포트포워딩은 아직 서버 관리자 승인 대기 상태다** — 8081/28081(웹)·8082/28082
+  (MLflow)가 이미 거친 절차와 같다. 그 전까지는 서버에서 `curl 127.0.0.1:8086/...`으로만 UI API를
+  확인할 수 있고, 로컬 PC나 외부에서는 접속할 수 없다.
 
 ## 장애 알림 (Alertmanager-lite)
 

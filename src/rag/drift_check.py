@@ -28,10 +28,69 @@ from pathlib import Path
 import pandas as pd
 from evidently import Dataset, DataDefinition, Report
 from evidently.metrics import ValueDrift
+from evidently.ui.workspace import Workspace
 
 _ROOT = Path(__file__).resolve().parents[2]
 _REFERENCE_PATH = _ROOT / "data" / "processed" / "retrieval_score_reference.json"
 _QUERY_LOG_PATH = _ROOT / "data" / "processed" / "retrieval_query_log.jsonl"
+
+_EVIDENTLY_WORKSPACE_PATH = _ROOT / "evidently_workspace"
+_EVIDENTLY_PROJECT_NAME = "safety-rag-drift"
+"""Evidently 셀프호스팅 UI(`python -m evidently.cli ui`)가 읽는 로컬 워크스페이스
+(의사결정_로그 126번). 이 파일의 PSI 계산 자체와는 독립된 "부가 기능"이다 — 매번
+check_drift()가 실제로 PSI를 계산할 때(status가 stable/moderate/drift일 때만, "판단
+불가" 상태에선 계산된 Report가 없으므로 저장할 것도 없다) 그 시점의 Report(Snapshot)를
+여기 저장해서, UI가 스크린샷처럼 "시간에 따른 결과" 차트를 그릴 수 있게 한다."""
+
+# evidently.ui.workspace의 실제 API(0.7.23 기준, 문서 대신 `inspect`로 직접 확인 —
+# Workspace/Project/add_run/search_project 등 버전마다 바뀌는 걸 이전에도 겪었다,
+# 124번). Workspace(로컬 파일 기반)와 CloudWorkspace는 별개 클래스 — Cloud 계정을
+# 안 쓰기로 했으므로(작업 지시) Workspace만 쓴다.
+_workspace_cache: dict[str, Workspace] = {}
+_project_cache: dict[tuple[str, str], object] = {}
+
+
+def _get_workspace(workspace_path: Path) -> Workspace:
+    key = str(workspace_path)
+    if key not in _workspace_cache:
+        _workspace_cache[key] = Workspace.create(key)
+    return _workspace_cache[key]
+
+
+def _get_or_create_project(workspace: Workspace, workspace_path: Path, name: str):
+    """`search_project`는 이름 완전일치로 검색한다(0.7.23 소스 직접 확인) — 매번
+    check_drift()가 호출될 때마다 프로젝트를 새로 만들지 않고 기존 프로젝트에 계속
+    스냅샷을 추가하려면 이 함수로 먼저 찾아야 한다."""
+    cache_key = (str(workspace_path), name)
+    if cache_key in _project_cache:
+        return _project_cache[cache_key]
+    existing = workspace.search_project(name)
+    project = existing[0] if existing else workspace.create_project(
+        name,
+        description="산업안전 RAG top-1 검색 유사도 PSI 드리프트 이력 — rag/drift_check.py가 "
+        "매번 실제 계산할 때마다(스냅샷 저장, /control-room \"데이터 드리프트 감지\" 카드와 "
+        "같은 계산) 여기에도 기록한다(의사결정_로그 126번).",
+    )
+    _project_cache[cache_key] = project
+    return project
+
+
+def record_snapshot_to_workspace(
+    snapshot,
+    workspace_path: Path = _EVIDENTLY_WORKSPACE_PATH,
+    project_name: str = _EVIDENTLY_PROJECT_NAME,
+) -> None:
+    """계산된 Report(Snapshot)를 Evidently UI 워크스페이스에 저장한다. 이 저장이
+    실패해도(워크스페이스 파일 권한 문제 등) check_drift()의 PSI 판정 자체(반환값)에는
+    영향을 주지 않는다 — /quality·/control-room 페이지의 핵심 경로가 부가 기능(UI 이력
+    저장) 때문에 죽으면 안 된다는 이 프로젝트의 기존 방어 원칙(app.py의 evidently
+    import guard와 같은 이유)을 여기서도 지킨다."""
+    try:
+        workspace = _get_workspace(workspace_path)
+        project = _get_or_create_project(workspace, workspace_path, project_name)
+        workspace.add_run(project.id, snapshot, include_data=False)
+    except Exception as exc:  # noqa: BLE001 — UI 이력 저장 실패는 무시하고 계속
+        print(f"[drift_check] Evidently UI 워크스페이스 저장 실패(무시): {exc}")
 
 _CURRENT_WINDOW = 200
 """최근 몇 건의 실서비스 쿼리 로그를 "현재 분포"로 볼지. 너무 크면 오래된(이미 지나간)
@@ -91,19 +150,27 @@ def load_recent_current(path: Path = _QUERY_LOG_PATH, n: int = _CURRENT_WINDOW) 
     return rows[-n:]
 
 
-def compute_psi(reference_scores: list[float], current_scores: list[float]) -> float:
-    """evidently의 실제 API(0.7.x)로 PSI를 계산한다. `Report([ValueDrift(method="psi")])`
-    + `Dataset.from_pandas()` — evidently 0.6 이전의 `TestSuite`/`ColumnDriftMetric` API와는
-    다르다(버전마다 API가 바뀌어서 설치된 버전을 직접 확인 후 이 형태로 작성함,
-    의사결정_로그 124번)."""
+def build_report(reference_scores: list[float], current_scores: list[float]):
+    """evidently의 실제 API(0.7.x)로 Report를 계산해서 Snapshot을 반환한다.
+    `Report([ValueDrift(method="psi")])` + `Dataset.from_pandas()` — evidently 0.6 이전의
+    `TestSuite`/`ColumnDriftMetric` API와는 다르다(버전마다 API가 바뀌어서 설치된 버전을
+    직접 확인 후 이 형태로 작성함, 의사결정_로그 124번). PSI 숫자(`compute_psi`)뿐 아니라
+    이 Snapshot 자체를 Evidently UI 워크스페이스에도 그대로 저장한다(126번,
+    `record_snapshot_to_workspace`) — 두 번 계산하지 않고 한 Report를 재사용한다."""
     ref_df = pd.DataFrame({"top1_score": reference_scores})
     cur_df = pd.DataFrame({"top1_score": current_scores})
     ref_dataset = Dataset.from_pandas(ref_df, data_definition=DataDefinition())
     cur_dataset = Dataset.from_pandas(cur_df, data_definition=DataDefinition())
 
     report = Report([ValueDrift(column="top1_score", method="psi")])
-    result = report.run(cur_dataset, ref_dataset)
-    return float(result.dict()["metrics"][0]["value"])
+    return report.run(cur_dataset, ref_dataset)
+
+
+def compute_psi(reference_scores: list[float], current_scores: list[float]) -> float:
+    """PSI 숫자만 필요한 호출부(테스트 등)를 위한 얇은 래퍼 — 내부적으로는
+    `build_report`와 동일한 Report를 계산한다."""
+    snapshot = build_report(reference_scores, current_scores)
+    return float(snapshot.dict()["metrics"][0]["value"])
 
 
 def check_drift(
@@ -111,6 +178,8 @@ def check_drift(
     query_log_path: Path = _QUERY_LOG_PATH,
     window: int = _CURRENT_WINDOW,
     min_current_n: int = _MIN_CURRENT_N,
+    record_to_workspace: bool = False,
+    workspace_path: Path = _EVIDENTLY_WORKSPACE_PATH,
 ) -> dict:
     """드리프트 감지 메인 함수. 항상 다음 중 하나의 status를 반환한다:
 
@@ -119,7 +188,14 @@ def check_drift(
     - "stable" / "moderate" / "drift": 실제로 계산된 PSI와 그 등급
 
     데이터가 부족한데 억지로 PSI를 계산해 보여주지 않는다 — "아직 드리프트 없음"과
-    "아직 판단할 수 없음"을 구분해서 정직하게 반환한다(CLAUDE.md 원칙)."""
+    "아직 판단할 수 없음"을 구분해서 정직하게 반환한다(CLAUDE.md 원칙).
+
+    `record_to_workspace`(기본 False)는 실제로 PSI를 계산한 경우에 한해(no_reference·
+    insufficient_data는 계산된 Report가 없어 저장할 것도 없음) 그 Report를 Evidently UI
+    워크스페이스에도 이력으로 남긴다(126번). 기본값을 False로 둔 이유: 이 함수는
+    tests/test_drift.py에서 tmp_path 기준으로 반복 호출되는데, 기본이 True면 테스트가
+    매번 저장소의 실제 evidently_workspace/를 건드리는 부작용이 생긴다 — 운영 호출부
+    (web/app.py의 `_rag_drift_summary()`)에서만 명시적으로 True를 넘긴다."""
     reference = load_reference(reference_path)
     if reference is None:
         return {
@@ -140,8 +216,12 @@ def check_drift(
         }
 
     reference_scores = reference["top1_scores"]
-    psi = compute_psi(reference_scores, current_scores)
+    snapshot = build_report(reference_scores, current_scores)
+    psi = float(snapshot.dict()["metrics"][0]["value"])
     status = status_from_psi(psi)
+
+    if record_to_workspace:
+        record_snapshot_to_workspace(snapshot, workspace_path=workspace_path)
 
     return {
         "status": status,

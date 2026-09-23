@@ -1,6 +1,24 @@
 {% extends "base.html" %}
 {% block title %}산업안전 통합관제 | MLOps-Edge-Lab{% endblock %}
 {% block content %}
+<style>
+  /* "검색 품질 드리프트" 카드를 quality.html에서 여기로 이동(사용자 요청) — 품질
+     평가 페이지보다 운영 모니터링 페이지(산업안전 통합관제)에 더 어울린다는 지적.
+     제목도 "데이터 드리프트 감지"로 바꿨다 — 이 카드가 실제로 측정하는 건 RAG
+     top-1 검색 유사도의 *데이터* 드리프트(Concept Drift 아님, 카드 설명 참고)이고,
+     이 페이지의 다른 섹션 제목("자동 시뮬레이션", "수동 시뮬레이션")처럼 명사형으로
+     맞췄다. */
+  .drift-badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 0.78rem; font-weight: 700; margin-left: 8px; }
+  .drift-stable { background: rgba(63,185,80,0.15); color: var(--normal); border: 1px solid var(--normal); }
+  .drift-moderate { background: rgba(210,153,34,0.15); color: var(--llm); border: 1px solid var(--llm); }
+  .drift-drift { background: rgba(219,68,68,0.15); color: var(--danger); border: 1px solid var(--danger); }
+  .drift-stat-row { display: flex; gap: 24px; flex-wrap: wrap; margin: 10px 0; }
+  .drift-stat { }
+  .drift-stat .label { font-size: 0.76rem; color: var(--muted); }
+  .drift-stat .value { font-size: 1.3rem; font-weight: 700; }
+  #rag-drift-rollback-btn { background: var(--danger); border-color: var(--danger); }
+  #rag-drift-result { margin-top: 8px; font-size: 0.85rem; }
+</style>
 <div class="page-header">
   <div>
     <h1>산업안전 통합관제</h1>
@@ -89,6 +107,81 @@
   </div>
 </div>
 </div>
+
+<div class="card" style="margin-top:16px;" id="rag-drift-card">
+  <strong>데이터 드리프트 감지</strong>
+  <div class="why">
+    <b>Evidently</b>는 운영 중인 모델·데이터의 품질을 통계적으로 점검해주는 오픈소스 라이브러리입니다. 아래 용어로 검색 품질이 바뀌었는지를 봅니다.
+    <ul style="margin:8px 0 8px 18px; padding:0;">
+      <li><b>reference(기준)</b> — "정상일 때" 값의 분포. 여기서는 실제 코퍼스 문서에서 LLM이 초안한 질문 116건으로 측정한 top-1 검색 유사도 점수 모음입니다.</li>
+      <li><b>current(현재)</b> — 지금 실서비스 쿼리(MSDS 검색·산업안전 통합관제·Agent SOP 검색)에서 최근 쌓인 같은 종류의 점수 모음입니다.</li>
+      <li><b>PSI(Population Stability Index)</b> — reference와 current 두 분포가 서로 얼마나 달라졌는지 하나의 숫자로 나타내는 지표. 원래 신용평가 모델의 입력 변수 변화를 감시하던 금융권 표준 지표를 가져와 씁니다 — 값이 클수록 두 분포가 겹치지 않고 멀어졌다는 뜻입니다.</li>
+      <li><b>Data Drift(데이터 드리프트)</b> — 들어오는 <i>데이터 자체</i>의 분포가 바뀌는 것(예: 질문 유형이 달라져 검색 점수대가 낮아짐). 여기서 PSI로 감지하는 게 바로 이것입니다.</li>
+      <li><b>Concept Drift(컨셉 드리프트)</b> — 데이터 분포는 그대로인데 <i>입력-출력 관계</i> 자체가 바뀌는 것(예: 같은 질문이어도 예전엔 맞던 답이 지금은 틀림). 이 카드는 검색 점수 분포만 보므로 Data Drift 전용이고, Concept Drift는 아직 이 프로젝트에서 별도로 측정하지 않습니다.</li>
+    </ul>
+    판정(&lt;2 안정 / 2~8 중간 / &gt;8 드리프트)은 코드 규칙이 정하고, 되돌리기(Rollback)는 사람이 아래 버튼을 눌러야만 실행됩니다.
+    이 임계치는 업계 관례값(보통 0.1/0.25)이 아니라, "진짜 드리프트가 없는 정상 상황"을 직접 반복 실측해서 이 지표(RAG 검색 점수)에 맞게 새로 잡은 값입니다 — 자세한 이유는 코드 주석(rag/drift_check.py) 참고. 각 확인 시점의 리포트는 Evidently 셀프호스팅 UI 워크스페이스에도 이력으로 쌓입니다(의사결정_로그 126번, 서버 관리자 포트포워딩 승인 대기 중이라 아직 외부 접속은 불가).
+  </div>
+  <div id="rag-drift-body"></div>
+</div>
+<script>window.__ragDriftInitial = {{ rag_drift | tojson }};</script>
+
+<script>
+function renderRagDrift(d) {
+  const body = document.getElementById('rag-drift-body');
+  if (!body) return;
+  if (d.status === 'no_reference' || d.status === 'unavailable' || d.status === 'error') {
+    body.innerHTML = `<div class="stat" style="margin-top:10px;">${d.message}</div>`;
+    return;
+  }
+  if (d.status === 'insufficient_data') {
+    body.innerHTML = `<div class="stat" style="margin-top:10px;">아직 실측할 만큼 쿼리가 쌓이지 않았습니다 — 현재 ${d.n_current}건 / 최소 ${d.min_required}건 필요. (기준 분포 ${d.n_reference}건은 확보됨)</div>`;
+    return;
+  }
+  const badgeClass = d.status === 'stable' ? 'drift-stable' : (d.status === 'moderate' ? 'drift-moderate' : 'drift-drift');
+  const badgeLabel = d.status === 'stable' ? '정상' : (d.status === 'moderate' ? '중간(주의)' : '드리프트');
+  body.innerHTML = `
+    <span class="drift-badge ${badgeClass}">${badgeLabel}</span>
+    <div class="drift-stat-row">
+      <div class="drift-stat"><div class="label">PSI</div><div class="value">${d.psi}</div></div>
+      <div class="drift-stat"><div class="label">기준(reference) 평균</div><div class="value">${d.reference_mean}</div></div>
+      <div class="drift-stat"><div class="label">현재(current) 평균</div><div class="value">${d.current_mean}</div></div>
+      <div class="drift-stat"><div class="label">표본 수</div><div class="value">${d.n_reference} / ${d.n_current}</div></div>
+    </div>
+    <div class="stat">확인 시각: ${d.checked_at || ''}</div>
+    ${d.status === 'drift' ? '<button type="button" id="rag-drift-rollback-btn" style="margin-top:10px;">이전 모델로 되돌리기</button>' : ''}
+    <div id="rag-drift-result"></div>
+  `;
+  const btn = document.getElementById('rag-drift-rollback-btn');
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      if (!confirm('산업안전 sLLM(toy-sensor-lora) Production 버전을 직전 버전으로 되돌립니다. 계속하시겠습니까?')) return;
+      btn.disabled = true;
+      const resultEl = document.getElementById('rag-drift-result');
+      resultEl.textContent = '↺ 되돌리는 중...';
+      try {
+        const res = await fetch('/api/rag-drift/rollback', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          resultEl.innerHTML = `<span style="color:var(--normal);">✓ v${data.rolled_back_from} → v${data.rolled_back_to}로 되돌렸습니다.</span>`;
+        } else {
+          resultEl.innerHTML = `<span style="color:var(--danger);">${data.message || '되돌리기 실패'}</span>`;
+        }
+      } catch (e) {
+        resultEl.innerHTML = '<span style="color:var(--danger);">되돌리기 중 오류가 발생했습니다.</span>';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+}
+
+if (window.__ragDriftInitial) {
+  // 서버 렌더 시점에 이미 계산해둔 값을 그대로 쓴다 — 페이지 로드 때마다 다시
+  // fetch할 필요 없음(다른 카드들도 서버사이드 렌더만 함, 같은 원칙).
+  renderRagDrift(window.__ragDriftInitial);
+}
+</script>
 
 <script>
 function escapeHtml(s) {

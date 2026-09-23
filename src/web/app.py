@@ -627,16 +627,21 @@ def _finetune_quality(path: Path) -> dict | None:
 
 def _rag_drift_summary() -> dict:
     """산업안전 RAG 검색 품질 드리프트 — rag/drift_check.py 실행 결과를 그대로
-    반환한다(의사결정_로그 124번). evidently 로드에 실패한 경우에도 /quality 페이지
-    자체는 떠야 하므로, 여기서도 한 번 더 방어한다(app.py 상단 import guard와 이중)."""
+    반환한다(의사결정_로그 124번). "데이터 드리프트 감지" 카드로 /control-room 페이지에
+    노출된다(원래 /quality에 있었으나 126번에서 이동). evidently 로드에 실패한 경우에도
+    페이지 자체는 떠야 하므로, 여기서도 한 번 더 방어한다(app.py 상단 import guard와 이중)."""
     if drift_check is None:
         return {
             "status": "unavailable",
             "message": "드리프트 감지 모듈을 불러오지 못했습니다(evidently 미설치 등) — 서버 로그 확인 필요.",
         }
     try:
-        return drift_check.check_drift()
-    except Exception as exc:  # noqa: BLE001 — 계산 실패가 /quality 페이지 자체를 죽이면 안 됨
+        # record_to_workspace=True — 이 함수가 호출될 때마다(페이지 로드·"다시 확인"
+        # 버튼 둘 다) 그 시점의 Report도 Evidently UI 워크스페이스에 이력으로 남긴다
+        # (126번). 저장 자체가 실패해도 이 반환값(판정 결과)에는 영향 없음
+        # (drift_check.record_snapshot_to_workspace 내부에서 별도로 방어).
+        return drift_check.check_drift(record_to_workspace=True)
+    except Exception as exc:  # noqa: BLE001 — 계산 실패가 페이지 자체를 죽이면 안 됨
         return {"status": "error", "message": f"드리프트 계산 중 오류: {exc}"}
 
 
@@ -652,7 +657,6 @@ def _quality_eval_summary() -> dict:
                 "key": "safety", "name": "산업안전 Agent",
                 "rag_note": "임베딩 단독 검색(하이브리드 없음) — 실제 안전문서 738건 코퍼스",
                 "rag": _rag_quality_safety(),
-                "rag_drift": _rag_drift_summary(),
                 "finetune": _finetune_quality(_SAFETY_FINETUNE_COMPARISON_PATH),
                 "finetune_note": "toy-sensor-lora — 학습 데이터가 템플릿 합성이라(21번) 절대 수치는 품질 지표가 아니라 파이프라인 동작 증거에 가깝습니다.",
             },
@@ -674,8 +678,9 @@ def quality(request: Request):
 
 @app.get("/api/rag-drift/check")
 def rag_drift_check():
-    """/quality 페이지가 로드 시 이미 이 값을 받지만, 새로고침 없이 "다시 확인"
-    버튼으로 최신 값을 다시 계산해볼 수 있게 별도 엔드포인트로도 노출한다."""
+    """/control-room 페이지가 로드 시 이미 이 값을 받지만, 새로고침 없이 "다시 확인"
+    버튼으로 최신 값을 다시 계산해볼 수 있게 별도 엔드포인트로도 노출한다(카드 자체는
+    126번에서 /quality → /control-room으로 이동, URL은 유지)."""
     return JSONResponse(_rag_drift_summary())
 
 
@@ -1625,6 +1630,10 @@ def control_room(request: Request):
             # 같이 필요해진 것 — 수동 시뮬레이션 섹션의 센서 입력 카드용.
             "sensors_range": range(1, _MAX_SENSORS + 1), "categories": _CATEGORY_SUBSTANCES,
             "categories_json": _CATEGORY_SUBSTANCES_JSON,
+            # "데이터 드리프트 감지" 카드를 quality.html에서 여기로 이동(사용자 요청,
+            # 운영 모니터링 페이지가 더 어울린다는 지적) — /api/rag-drift/* 엔드포인트는
+            # 그대로이고, 카드가 붙는 페이지만 바뀌었다.
+            "rag_drift": _rag_drift_summary(),
         },
     )
 

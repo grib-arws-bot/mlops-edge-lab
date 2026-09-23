@@ -83,6 +83,50 @@ def test_check_drift_flags_drift_when_distribution_shifts(tmp_path):
     assert result["psi"] > drift_check.PSI_MODERATE_MAX
 
 
+def test_check_drift_records_snapshot_to_workspace(tmp_path):
+    """record_to_workspace=True일 때 실제로 Evidently 셀프호스팅 UI 워크스페이스에
+    스냅샷이 쌓이는지 확인한다(의사결정_로그 126번) — Workspace/Project API도 버전마다
+    바뀌므로(124번과 같은 이유로 실측) mock 대신 실제 evidently.ui.workspace를 호출해서
+    검증한다. workspace_path를 tmp_path로 넘겨서 저장소의 실제 evidently_workspace/를
+    건드리지 않는다(운영 호출부인 web/app.py만 기본 경로를 쓴다)."""
+    ref_scores = [0.85 + 0.002 * (i % 10) for i in range(30)]
+    cur_scores = [0.86 + 0.002 * (i % 10) for i in range(30)]
+
+    ref_path = tmp_path / "reference.json"
+    ref_path.write_text(json.dumps({"top1_scores": ref_scores, "n": len(ref_scores)}), encoding="utf-8")
+    log_path = tmp_path / "log.jsonl"
+    with log_path.open("w", encoding="utf-8") as f:
+        for score in cur_scores:
+            f.write(json.dumps({"top1_score": score, "query_len": 5}) + "\n")
+
+    ws_path = tmp_path / "evidently_workspace"
+    result = drift_check.check_drift(
+        reference_path=ref_path, query_log_path=log_path, min_current_n=10,
+        record_to_workspace=True, workspace_path=ws_path,
+    )
+    assert result["status"] in ("stable", "moderate", "drift")
+
+    from evidently.ui.workspace import Workspace  # noqa: PLC0415 — 테스트에서만 필요
+
+    # drift_check 내부 캐시가 아니라 새로 연 Workspace로 디스크에 실제로 저장됐는지 확인.
+    ws = Workspace.create(str(ws_path))
+    projects = ws.search_project(drift_check._EVIDENTLY_PROJECT_NAME)
+    assert len(projects) == 1
+    runs = ws.list_runs(projects[0].id)
+    assert len(runs) == 1
+
+    # 두 번째 호출 — 같은 프로젝트에 스냅샷이 "누적"되는지(매번 새 프로젝트를 만들지
+    # 않는지) 확인. 이게 바로 UI의 "시간에 따른 결과" 차트가 성립하는 조건이다.
+    drift_check.check_drift(
+        reference_path=ref_path, query_log_path=log_path, min_current_n=10,
+        record_to_workspace=True, workspace_path=ws_path,
+    )
+    ws2 = Workspace.create(str(ws_path))
+    projects2 = ws2.search_project(drift_check._EVIDENTLY_PROJECT_NAME)
+    assert len(projects2) == 1  # 프로젝트가 중복 생성되지 않음
+    assert len(ws2.list_runs(projects2[0].id)) == 2  # 스냅샷은 누적됨
+
+
 def test_load_recent_current_uses_most_recent_window(tmp_path):
     log_path = tmp_path / "log.jsonl"
     with log_path.open("w", encoding="utf-8") as f:
