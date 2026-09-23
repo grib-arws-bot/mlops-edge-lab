@@ -32,7 +32,7 @@ import argparse
 import hashlib
 import json
 import re
-import urllib.request
+import subprocess
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -42,7 +42,6 @@ _RAW_MSDS_DIR = _ROOT / "data" / "raw" / "msds"
 _HF_REVISION = "5db49df655360dc69cc250ecb41058bf464553fa"
 _HF_URL = f"https://huggingface.co/datasets/Yuyongkim/inconvenience-msds/resolve/{_HF_REVISION}/train.jsonl"
 _EXPECTED_SHA256 = "2c342e638e403540076f0e0d13d0018f7671b11747b5a40cb67a5245d13a4227"
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MLOps-Edge-Lab/1.0)"}
 
 _SECTION_ORDER = list(range(1, 17))
 
@@ -61,34 +60,31 @@ def _sha256(path: Path) -> str:
 
 
 def download(dest: Path) -> None:
-    """원본 JSONL을 저장 — 이미 있고 해시가 맞으면 재다운로드 생략(멱등)."""
+    """원본 JSONL을 저장 — 이미 있고 해시가 맞으면 재다운로드 생략(멱등).
+
+    urllib.request로 직접 받아봤더니 882MB 중 128KB만 받고 조용히 끊기는 문제가
+    실제로 있었다(2026-09-23 실측 — 예외 없이 스트림이 일찍 끝남, HF의 CDN
+    리다이렉트 체인과 urllib의 상호작용 문제로 추정). curl은 같은 URL을 문제없이
+    완주했다(55초, 정확히 882,524,767바이트) — 그래서 subprocess로 curl을 그대로
+    쓴다. 실패해도 이어받기 가능(-C -)."""
     if dest.exists() and _sha256(dest) == _EXPECTED_SHA256:
         print(f"이미 있음(해시 일치) — 다운로드 생략: {dest}")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"다운로드 시작: {_HF_URL}")
-    req = urllib.request.Request(_HF_URL, headers=_HEADERS)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with urllib.request.urlopen(req, timeout=60) as resp, tmp.open("wb") as out:
-        total = int(resp.headers.get("Content-Length", 0))
-        written = 0
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
-            written += len(chunk)
-            if total:
-                print(f"\r  {written / 1e6:.0f}MB / {total / 1e6:.0f}MB", end="", flush=True)
-    print()
-    tmp.replace(dest)
-    actual = _sha256(dest)
+    print(f"다운로드 시작(curl): {_HF_URL}")
+    subprocess.run(
+        ["curl", "-fL", "-C", "-", "--retry", "3", "-o", str(tmp), _HF_URL],
+        check=True,
+    )
+    actual = _sha256(tmp)
     if actual != _EXPECTED_SHA256:
         tmp.unlink(missing_ok=True)
         raise ValueError(
             f"해시 불일치 — 예상 {_EXPECTED_SHA256}, 실제 {actual}. "
             "데이터셋이 갱신됐을 수 있음 — _HF_REVISION/_EXPECTED_SHA256를 huggingface.co에서 재확인할 것."
         )
+    tmp.replace(dest)
     print(f"다운로드 완료·해시 검증됨: {dest}")
 
 
