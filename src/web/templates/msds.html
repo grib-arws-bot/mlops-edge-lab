@@ -60,7 +60,7 @@
 
   <div class="card">
     <strong>2. 전체 소스에서 검색</strong>
-    <div class="why">질문이나 키워드로 관련 조각을 찾습니다 — 산업안전 원본 문서와 MSDS를 함께, 또는 범위를 좁혀서 검색할 수 있습니다.</div>
+    <div class="why">질문을 하면 sLLM이 관련 문서 조각(산업안전 원본+MSDS, 범위 선택 가능)만 근거로 답합니다 — 근거에 없으면 "찾지 못했다"고 답하고, 답변 아래에 실제로 참고한 원문 조각을 그대로 보여줍니다.</div>
     <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
       <select id="msds-scope-select" class="msds-scope-select">
         <option value="all">전체 소스(산업안전+MSDS)</option>
@@ -71,6 +71,7 @@
     <input type="text" id="msds-query-input" placeholder="예: 벤젠 취급 시 보호구는?" style="margin-top:8px;">
     <button type="button" id="msds-search-btn" style="margin-top:8px;">검색</button>
     <div id="msds-search-status" class="stat" style="margin-top:8px;"></div>
+    <div id="msds-answer-area"></div>
     <div id="msds-search-results" style="margin-top:8px; max-height:440px; overflow-y:auto;"></div>
   </div>
 </div>
@@ -115,8 +116,10 @@ document.getElementById('msds-search-btn').addEventListener('click', async () =>
   const scope = document.getElementById('msds-scope-select').value;
   const statusEl = document.getElementById('msds-search-status');
   const resultsEl = document.getElementById('msds-search-results');
+  const answerEl = document.getElementById('msds-answer-area');
   if (!query) { statusEl.textContent = '검색어를 입력하세요.'; return; }
-  statusEl.textContent = '↺ 검색 중...';
+  statusEl.textContent = '↺ 검색 + sLLM 답변 생성 중... (수십 초 소요)';
+  answerEl.innerHTML = '';
   resultsEl.innerHTML = '';
   try {
     const res = await fetch('/api/msds/search', {
@@ -125,7 +128,10 @@ document.getElementById('msds-search-btn').addEventListener('click', async () =>
     });
     const data = await res.json();
     if (!res.ok) { statusEl.textContent = data.error || '검색 실패'; return; }
-    statusEl.textContent = `완료 — ${data.results.length}건`;
+    statusEl.textContent = `완료 — 근거 ${data.results.length}건`;
+    answerEl.innerHTML = data.answer
+      ? `<div class="card" style="margin-top:8px; border-left:3px solid var(--accent);"><strong>sLLM 답변</strong><div class="stat" style="white-space:pre-wrap; margin-top:4px;">${escapeHtml(data.answer)}</div></div>`
+      : '<div class="stat" style="margin-top:8px;">근거를 찾지 못해 답변을 생성하지 않았습니다.</div>';
     resultsEl.innerHTML = data.results.map(r => `
       <div class="msds-search-hit">
         <span class="src">${escapeHtml(r.source)}</span><span class="score">score=${r.score}</span>

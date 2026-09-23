@@ -698,8 +698,22 @@ def msds_detail(chem_id: str):
     return JSONResponse({"entry": entry, "text": path.read_text(encoding="utf-8")})
 
 
+_MSDS_SEARCH_SYSTEM_PROMPT = (
+    "당신은 산업안전·MSDS(물질안전보건자료) 문서를 근거로 답변하는 도우미입니다. "
+    "아래 [참고 문서]에 있는 내용만 근거로 답하세요. "
+    "근거에 없는 내용은 답하지 말고 '문서에서 근거를 찾지 못했습니다'라고 답하세요. "
+    "답변 끝 줄에 참고한 문서명을 '(출처: ...)' 형식으로 표시하세요."
+)
+
+
 @app.post("/api/msds/search")
 async def msds_search(request: Request):
+    """검색 결과(청크)만 보여주던 걸 sLLM 답변 생성까지 잇는다(사용자 지적,
+    2026-09-23) — 임베딩 검색만으로는 "이 프로젝트의 sLLM을 활용한 서비스"가
+    아니라 그냥 벡터 검색이다. edu-admin/RAG·산업안전 rag/query.py의 answer()와
+    같은 패턴: 검색된 조각만 근거로 답하게 하고, 근거 없으면 모른다고 답하게
+    한다 — 그리고 답변과 함께 원문 조각도 그대로 보여줘서(근거 없는 판정은
+    화면에 내보내지 않는다는 이 프로젝트의 원칙) 사람이 직접 검증할 수 있게 한다."""
     payload = await request.json()
     query = (payload.get("query") or "").strip()
     scope = payload.get("scope", "all")
@@ -714,16 +728,24 @@ async def msds_search(request: Request):
     loop = asyncio.get_event_loop()
 
     def _run():
-        return rag_query.retrieve(
+        hits = rag_query.retrieve(
             query, embed_model, index, meta, top_k=8, source_filter=_msds_source_filter(scope),
         )
+        if not hits:
+            return hits, None
+        context = "\n\n".join(f"[{h['source']} #{h['chunk_id']}]\n{h['text']}" for h, _ in hits)
+        answer_text = _llm_raw_call(
+            _MSDS_SEARCH_SYSTEM_PROMPT, f"[참고 문서]\n{context}\n\n[질문]\n{query}",
+            temperature=0.0, max_tokens=500,
+        )
+        return hits, answer_text
 
-    hits = await loop.run_in_executor(None, _run)
+    hits, answer_text = await loop.run_in_executor(None, _run)
     results = [
         {"source": h["source"], "chunk_id": h["chunk_id"], "text": h["text"], "score": round(score, 3)}
         for h, score in hits
     ]
-    return JSONResponse({"results": results})
+    return JSONResponse({"answer": answer_text, "results": results})
 
 
 # ────────────────────────────────────────────────────────────────
