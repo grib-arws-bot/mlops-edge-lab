@@ -844,10 +844,15 @@ async def msds_search(request: Request):
         )
         if not hits:
             return hits, None
-        context = "\n\n".join(f"[{h['source']} #{h['chunk_id']}]\n{h['text']}" for h, _ in hits)
+        # 실측 버그(2026-09-23): 근거 8건을 전부 LLM 컨텍스트에 넣었더니
+        # "Requested tokens (5063) exceed context window of 4096"으로 500 에러가
+        # 났다(공유 LLM 인스턴스는 n_ctx=4096으로 고정, 다른 기능들도 같이 쓰는
+        # 자원이라 여기서만 늘릴 수 없음). 화면에 보여줄 근거(hits)는 8건 그대로
+        # 두되, LLM에 실제로 넣는 컨텍스트는 상위 4건 + 청크당 500자로 줄인다.
+        context = "\n\n".join(f"[{h['source']} #{h['chunk_id']}]\n{h['text'][:500]}" for h, _ in hits[:4])
         answer_text = _llm_raw_call(
             _MSDS_SEARCH_SYSTEM_PROMPT, f"[참고 문서]\n{context}\n\n[질문]\n{query}",
-            temperature=0.0, max_tokens=500,
+            temperature=0.0, max_tokens=400,
         )
         return hits, answer_text
 
