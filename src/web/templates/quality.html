@@ -92,8 +92,10 @@
   <div class="card" style="margin-top:16px;" id="rag-drift-card">
     <strong>검색 품질 드리프트</strong>
     <div class="why">
-      골든셋 채점 시점(reference)의 top-1 유사도 분포와 실서비스 쿼리(MSDS 검색·산업안전 통합관제·Agent SOP 검색)의 최근 분포(current)를
-      Evidently로 비교한 PSI(Population Stability Index)입니다.
+      <b>Evidently</b>는 운영 중인 모델·데이터의 품질을 통계적으로 점검해주는 오픈소스 라이브러리입니다.
+      <b>PSI(Population Stability Index)</b>는 두 시점의 값 분포가 서로 얼마나 달라졌는지 하나의 숫자로 나타내는 지표로,
+      원래 신용평가 모델의 입력 변수 변화를 감시하던 금융권 표준 지표를 데이터 드리프트 감지에 가져와 쓴 것입니다 — 값이 클수록 두 분포가 겹치지 않고 멀어졌다는 뜻입니다.
+      여기서는 골든셋 채점 시점(reference)의 top-1 유사도 분포와 실서비스 쿼리(MSDS 검색·산업안전 통합관제·Agent SOP 검색)의 최근 분포(current)를 이 방식으로 비교합니다.
       판정(&lt;0.1 안정 / 0.1~0.25 중간 / &gt;0.25 드리프트)은 코드 규칙이 정하고, 되돌리기(Rollback)는 사람이 아래 버튼을 눌러야만 실행됩니다.
     </div>
     <div id="rag-drift-body"></div>
