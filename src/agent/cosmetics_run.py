@@ -55,6 +55,14 @@ _TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "query_recent_ticks",
+            "description": "화면에 보이는 미생물 발효기의 최근 실시간 시계열(온도·pH·DO·RPM)과 이상 감지 메모를 조회한다. '시점 N부터 M까지 무슨 문제가 있었냐'처럼 방금 진행된 시나리오 자체에 대한 질문일 때 사용 — 과거에 이미 종료·저장된 배치 이력(query_lot)과는 다르다.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "predict_condition",
             "description": "아직 진행하지 않은 새 배치에 대한 권장 운전조건을 추천받는다(과거 이력이 아니라 사전 추천이 필요할 때 사용).",
             "parameters": {
@@ -72,13 +80,18 @@ _NO_EVIDENCE_MSG = "자료에서 근거를 찾지 못했습니다."
 
 _SYSTEM_PROMPT = (
     "당신은 화장품 제조 현장의 AI 업무지원 에이전트입니다. 작업자의 질문에 답하기 위해 "
-    "필요하면 search_sop(SOP 문서 검색), query_lot(생산 Lot 이력 조회), predict_condition"
-    "(신규 배치 추천 조건, 과거 이력이 아닌 사전 추천일 때만) 도구를 사용하세요.\n"
+    "필요하면 search_sop(SOP 문서 검색), query_lot(과거에 종료·저장된 생산 Lot 이력 조회), "
+    "query_recent_ticks(지금 화면에 보이는 시나리오의 최근 실시간 시점 이력 — '시점 N', "
+    "'방금', '지금까지' 같은 질문에 사용), predict_condition(신규 배치 추천 조건, 과거 이력이 "
+    "아닌 사전 추천일 때만) 도구를 사용하세요.\n"
+    "query_recent_ticks가 돌려준 시점 범위 밖을 물어보면(예: 표시된 것보다 훨씬 이전 시점), "
+    "모른다고 하지 말고 '표시된 범위(가장 오래된 시점~최신 시점) 밖이라 알 수 없습니다'라고 "
+    "정확히 답하세요.\n"
     "도구가 필요하면 판단 과정을 문장으로 먼저 설명하지 말고 곧바로 호출하세요 — "
     "설명은 도구 결과를 받은 뒤 최종 답변에서만 하세요.\n"
     "반드시 지킬 규칙(이 순서로 먼저 판단하세요):\n"
     "0) 인사말처럼 SOP·Lot·공정과 무관한 질문이 아니라면, 아는 내용이라고 생각되더라도 "
-    "먼저 search_sop 등 도구를 최소 1회 호출해 근거를 확인한 뒤에만 답하세요. 도구를 하나도 "
+    "먼저 도구를 최소 1회 호출해 근거를 확인한 뒤에만 답하세요. 도구를 하나도 "
     "호출하지 않고 기술적인 내용을 답하는 것은 금지됩니다.\n"
     "1) 먼저 확인: 이 요청이 설비 제어(운전조건 실제 변경), 배치 합격/불합격 등 품질의 "
     "'최종 판정' 확정, 또는 COA 등 공식 문서 '확정'을 요청하는 것입니까? 그렇다면 당신은 "
@@ -124,7 +137,12 @@ class ToolStep:
     detail: dict = field(default_factory=dict)
 
 
-_LAYER_LABEL = {1: "Layer 1 · 장비", 2: "Layer 2 · 데이터(RDB)", 3: "Layer 3 · AI 분석", 4: "Layer 4 · 지식베이스(SOP)"}
+_LAYER_LABEL = {
+    1: "Layer 1 · 장비(실시간 시계열)", 2: "Layer 2 · 데이터(RDB)", 3: "Layer 3 · AI 분석", 4: "Layer 4 · 지식베이스(SOP)",
+}
+# Layer 1(장비) 뱃지는 지금까지 정의만 돼 있고 실제로 쓰는 도구가 없었다(query_lot은
+# 이미 저장된 Layer 2 RDB, predict_condition은 Layer 3) — query_recent_ticks가 처음으로
+# "아직 DB에 쌓이기 전, 화면에 보이는 실시간 장비 값" 자리를 채운다.
 
 
 def _run_query_lot(args: dict) -> tuple[dict, ToolStep]:
@@ -135,6 +153,23 @@ def _run_query_lot(args: dict) -> tuple[dict, ToolStep]:
         tool="query_lot", layer=2, layer_label=_LAYER_LABEL[2], args=args, result_summary=summary,
         detail={"lots": lots, "equipment_trace": result["equipment_trace"]},
     )
+    return result, step
+
+
+def _run_query_recent_ticks(live_ticks: list[dict]) -> tuple[dict, ToolStep]:
+    """query_lot(과거에 종료·저장된 배치)과 달리, 이건 브라우저 화면에 그려지고 있는
+    "지금 이 시나리오"의 최근 시점 값이다 — 서버는 이 값을 따로 갖고 있지 않고,
+    프론트가 매 질문마다 화면에 보이는 이력을 같이 보내준다(2026-09-23, 사용자 지적:
+    "Layer 4에 직접 질문하기"가 실시간 데이터에 대한 질문엔 답을 못 하고 있었음).
+    화면에 그려진 범위(logRows, 최근 최대 50개) 밖의 시점은 이 도구로도 알 수 없다
+    — 그 경우는 정직하게 '표시된 범위 밖'이라고 답해야 한다(시스템 프롬프트에 명시)."""
+    if not live_ticks:
+        result = {"ticks": [], "note": "화면에 표시된 실시간 이력이 없습니다(아직 시나리오를 시작하지 않았을 수 있음)."}
+        summary = "실시간 이력 없음"
+    else:
+        result = {"ticks": live_ticks, "count": len(live_ticks)}
+        summary = f"최근 {len(live_ticks)}개 시점 조회됨(최신: {live_ticks[0].get('t', '?')})"
+    step = ToolStep(tool="query_recent_ticks", layer=1, layer_label=_LAYER_LABEL[1], args={}, result_summary=summary, detail=result)
     return result, step
 
 
@@ -152,7 +187,10 @@ def _run_search_sop(ctx: CosmeticsToolContext, args: dict) -> tuple[list[dict], 
     return hits, step
 
 
-def run_cosmetics_agent(question: str, ctx: CosmeticsToolContext, llm: Llama, max_tool_turns: int = 4) -> dict:
+def run_cosmetics_agent(
+    question: str, ctx: CosmeticsToolContext, llm: Llama, max_tool_turns: int = 4,
+    live_ticks: list[dict] | None = None,
+) -> dict:
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -183,6 +221,8 @@ def run_cosmetics_agent(question: str, ctx: CosmeticsToolContext, llm: Llama, ma
 
             if fn_name == "query_lot":
                 tool_result, step = _run_query_lot(args)
+            elif fn_name == "query_recent_ticks":
+                tool_result, step = _run_query_recent_ticks(live_ticks)
             elif fn_name == "predict_condition":
                 tool_result, step = _run_predict_condition(args)
             elif fn_name == "search_sop":

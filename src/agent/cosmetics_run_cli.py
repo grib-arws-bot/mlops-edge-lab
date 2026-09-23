@@ -25,14 +25,16 @@ _GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
 
 def main() -> None:
     input_path, output_path = sys.argv[1], sys.argv[2]
-    question = json.loads(Path(input_path).read_text(encoding="utf-8"))["question"]
+    payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    question = payload["question"]
+    live_ticks = payload.get("live_ticks")
     n_threads = int(os.environ.get("AGENT_THREADS", "2"))
     n_gpu_layers = -1 if os.environ.get("AGENT_GPU") == "1" else 0
 
     ctx = CosmeticsToolContext()
     llm = Llama(model_path=str(_GGUF_PATH), n_ctx=4096, n_threads=n_threads, n_gpu_layers=n_gpu_layers, verbose=False)
 
-    result = run_cosmetics_agent(question, ctx, llm)
+    result = run_cosmetics_agent(question, ctx, llm, live_ticks=live_ticks)
     Path(output_path).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 

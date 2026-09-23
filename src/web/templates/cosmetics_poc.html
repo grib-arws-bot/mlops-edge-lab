@@ -111,7 +111,7 @@
 
 <div class="card">
   <strong>Layer 4에 직접 질문하기</strong>
-  <div class="why">시나리오와 별개로, 같은 AI Agent(sLLM)에게 자유롭게 질문할 수 있습니다. Agent가 SOP 검색 / Lot 이력 조회 / 추천조건(mock) 도구를 스스로 판단해 호출합니다.</div>
+  <div class="why">시나리오와 별개로, 같은 AI Agent(sLLM)에게 자유롭게 질문할 수 있습니다. Agent가 SOP 검색 / Lot 이력 조회 / 추천조건(mock) / 최근 실시간 이력 도구를 스스로 판단해 호출합니다. 실시간 이력은 화면에 보이는 최근 시점까지만 조회됩니다.</div>
   <div class="example-chips" id="example-chips"></div>
   <input type="text" id="question-input" placeholder="예: EXT-20260903-02 로트는 왜 불합격이야?" />
   <button id="ask-btn">질문하기</button>
@@ -248,7 +248,10 @@ function renderStage1(tick) {
   el.innerHTML = `<div><span class="stage-no">1</span><strong>Layer 1 · 3대 핵심설비</strong></div>${body}`;
 }
 
-const MAX_LOG_ROWS = 10;
+// Layer 4 자유 질의가 이 이력을 그대로 근거로 쓰므로(2026-09-23), 화면에 보여줄
+// 개수보다 넉넉하게 들고 있어야 "몇 시점 전"까지 물어봐도 답할 수 있다. 숫자
+// 몇 개짜리 행이라 50개도 메모리 비용은 무시할 만하다.
+const MAX_LOG_ROWS = 50;
 
 function pushLog(tick, note) {
   logRows.unshift({ ...tick, note: note || null });
@@ -606,6 +609,14 @@ function renderStepDetail(step) {
   if (step.tool === 'query_lot') {
     return renderEquipmentTrace(step.detail.equipment_trace);
   }
+  if (step.tool === 'query_recent_ticks') {
+    const ticks = step.detail.ticks || [];
+    if (!ticks.length) return `<div class="stat">${escapeHtml(step.detail.note || '이력 없음')}</div>`;
+    return ticks.map(t => `<div class="stat" style="border-bottom:1px dashed var(--border); padding:3px 0;">
+      <b>${escapeHtml(t.t)}</b> 온도 ${t.발효온도_C}℃ · pH ${t.pH_최종} · DO ${t.DO_평균_pct}% · RPM ${t.교반RPM}
+      ${t.note ? `<span style="color:var(--llm);"> — ${escapeHtml(t.note)}</span>` : ''}
+    </div>`).join('');
+  }
   if (step.tool === 'predict_condition' && step.detail.recommended_condition) {
     const rc = step.detail.recommended_condition;
     const rows = Object.entries(rc).map(([k, v]) => `<span class="equip-chip">${escapeHtml(k)} = ${escapeHtml(v)}</span>`).join('');
@@ -642,8 +653,13 @@ async function askAgent() {
   document.getElementById('layer-timeline').innerHTML = '<div class="stat">Agent가 질문을 분석하고 도구를 호출하는 중입니다...</div>';
   document.getElementById('final-answer').textContent = '';
   try {
+    // logRows(화면에 보이는 최근 시점 이력)를 같이 보내야 Agent가 "시점 N~M에 무슨
+    // 문제가 있었냐" 같은 질문에 답할 수 있다 — 이 데이터는 브라우저에서만 생성되고
+    // 서버에는 원래 전혀 전달되지 않아서, 이전에는 이런 질문에 무조건 "근거를 찾지
+    // 못했습니다"로 답할 수밖에 없었다(사용자 지적, 2026-09-23).
     const res = await fetch('/api/cosmetics/ask', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: q}),
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: q, live_ticks: logRows}),
     });
     const data = await res.json();
     if (data.error) {

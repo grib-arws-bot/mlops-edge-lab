@@ -919,6 +919,10 @@ async def cosmetics_ask(request: Request):
     question = (payload.get("question") or "").strip()
     if not question:
         return JSONResponse({"error": "질문을 입력하세요"}, status_code=400)
+    # 화면에 보이는 최근 실시간 시점 이력(사용자 요청, 2026-09-23) — 이 데이터는
+    # 브라우저에서만 생성되고 서버가 따로 들고 있지 않아서, 프론트가 매 질문마다
+    # 같이 보내줘야 query_recent_ticks 도구가 답할 수 있다.
+    live_ticks = payload.get("live_ticks")
 
     # 기본값은 "서버 기본"(인프로세스, 제한 없음) — 통합관제와 달리 이 엔드포인트는
     # 기존에 이미 빠른 인프로세스 호출로 쓰이고 있었으므로(Layer 4 자유 질의), 프런트가
@@ -938,11 +942,11 @@ async def cosmetics_ask(request: Request):
                 if is_gpu:
                     _gpu_llm_busy = True
                 try:
-                    return run_cosmetics_agent(question, _state["cosmetics_ctx"], llm)
+                    return run_cosmetics_agent(question, _state["cosmetics_ctx"], llm, live_ticks=live_ticks)
                 finally:
                     if is_gpu:
                         _gpu_llm_busy = False
-        return _run_cosmetics_emulated(question, profile["cores"], profile["mem_gb"], profile.get("gpu", False))
+        return _run_cosmetics_emulated(question, profile["cores"], profile["mem_gb"], profile.get("gpu", False), live_ticks)
 
     try:
         result = await loop.run_in_executor(None, _run)
@@ -1139,7 +1143,7 @@ def _run_events_emulated(events: list[dict], cores: int, mem_gb: int, gpu: bool,
         return json.loads(output_path.read_text(encoding="utf-8"))
 
 
-def _run_cosmetics_emulated(question: str, cores: int, mem_gb: int, gpu: bool) -> dict:
+def _run_cosmetics_emulated(question: str, cores: int, mem_gb: int, gpu: bool, live_ticks: list[dict] | None = None) -> dict:
     """화장품 PoC Layer 4 — 질문 하나를 _run_events_emulated와 동일한 방법(systemd-run
     cgroup + taskset)으로 에뮬레이션된 엣지 스펙에서 실행한다(agent/cosmetics_run_cli.py).
     산업안전 쪽은 센서 이벤트 리스트를 주고받지만 이쪽은 질문 문자열 하나만 주고받는
@@ -1151,7 +1155,7 @@ def _run_cosmetics_emulated(question: str, cores: int, mem_gb: int, gpu: bool) -
     with tempfile.TemporaryDirectory() as tmp:
         input_path = Path(tmp) / "input.json"
         output_path = Path(tmp) / "output.json"
-        input_path.write_text(json.dumps({"question": question}, ensure_ascii=False), encoding="utf-8")
+        input_path.write_text(json.dumps({"question": question, "live_ticks": live_ticks}, ensure_ascii=False), encoding="utf-8")
 
         cmd = [
             "systemd-run", "--user", "--scope", "--quiet", f"--unit={scope_unit}",
