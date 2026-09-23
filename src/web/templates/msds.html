@@ -161,11 +161,14 @@ function renderMsdsSearchResultDetail(idx) {
   const detailEl = document.getElementById('msds-search-detail-area');
   document.querySelectorAll('.msds-search-result-item').forEach((el, i) => el.classList.toggle('active', i === idx));
   // 출처·유사도는 위 목록에 이미 표시돼 있으니(사용자 지적, 2026-09-23) 상세에는
-  // 반복하지 않고 근거 내용만 보여준다.
-  detailEl.innerHTML = `
-    <table class="msds-detail-table">
-      <tr><th>근거 내용</th><td>${escapeHtml(r.text)}</td></tr>
-    </table>`;
+  // 반복하지 않고 근거 내용만 보여준다. MSDS 청크는 여러 하위 항목(예: "1. 화학제품과
+  // 회사에 관한 정보", "2. 유해성·위험성")을 통째로 담고 있을 수 있어, 있으면
+  // 항목별로 행을 나눈다(사용자 요청, 2026-09-23) — 없으면(산업안전 문서 등) 기존처럼
+  // 단일 행으로 표시한다.
+  const rows = (r.sections && r.sections.length)
+    ? r.sections.map(s => `<tr><th>${s.no}. ${escapeHtml(s.title)}</th><td>${escapeHtml(s.text) || '(내용 없음)'}</td></tr>`).join('')
+    : `<tr><th>근거 내용</th><td>${escapeHtml(r.text)}</td></tr>`;
+  detailEl.innerHTML = `<table class="msds-detail-table">${rows}</table>`;
 }
 
 document.getElementById('msds-search-btn').addEventListener('click', async () => {

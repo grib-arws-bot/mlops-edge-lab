@@ -863,6 +863,12 @@ async def msds_search(request: Request):
             "source": h["source"], "chunk_id": h["chunk_id"], "text": h["text"], "score": round(score, 3),
             "display_name": _msds_display_name(h["source"], catalog_by_id),
             "is_msds": h["source"].startswith("msds_"),
+            # 근거 내용을 "1. 화학제품과 회사에 관한 정보" / "2. 유해성·위험성" 같은
+            # MSDS 하위 항목별로 나눠 보여달라는 요청(2026-09-23) — 한 청크에 여러
+            # 섹션이 통째로 들어있을 수 있으므로(chunk.py의 섹션 단위 패킹) 저장
+            # 형식을 그대로 재파싱한다. 마커가 없는 산업안전 문서는 빈 리스트가
+            # 되고, 프론트에서 기존처럼 단일 텍스트로 표시한다.
+            "sections": _parse_msds_sections(h["text"]),
         }
         for h, score in hits
     ]
