@@ -33,14 +33,21 @@ import hashlib
 import json
 import re
 import subprocess
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 _TEXT_DIR = _ROOT / "data" / "processed" / "text"
 _RAW_MSDS_DIR = _ROOT / "data" / "raw" / "msds"
+_CATALOG_PATH = _ROOT / "data" / "processed" / "msds_catalog.json"
+_SYNC_STATUS_PATH = _ROOT / "data" / "processed" / "msds_sync_status.json"
 
+_HF_DATASET_ID = "Yuyongkim/inconvenience-msds"
 _HF_REVISION = "5db49df655360dc69cc250ecb41058bf464553fa"
-_HF_URL = f"https://huggingface.co/datasets/Yuyongkim/inconvenience-msds/resolve/{_HF_REVISION}/train.jsonl"
+_HF_URL = f"https://huggingface.co/datasets/{_HF_DATASET_ID}/resolve/{_HF_REVISION}/train.jsonl"
+_HF_API_URL = f"https://huggingface.co/api/datasets/{_HF_DATASET_ID}"
 _EXPECTED_SHA256 = "2c342e638e403540076f0e0d13d0018f7671b11747b5a40cb67a5245d13a4227"
 
 _SECTION_ORDER = list(range(1, 17))
@@ -120,9 +127,14 @@ def ingest(jsonl_path: Path, limit: int | None = None) -> int:
 
     이미 추출된 순수 텍스트라 extract/run.py(PDF/HWP 등 포맷 변환용) 단계를 건너뛰고
     build_index.py가 바로 읽는 위치에 놓는다 — 변환할 게 없는 데이터를 그 파이프라인에
-    억지로 통과시키는 건 불필요한 재작업일 뿐이다."""
+    억지로 통과시키는 건 불필요한 재작업일 뿐이다.
+
+    같은 패스에서 물질 카탈로그(msds_catalog.json)도 같이 만든다 — 웹 페이지의
+    "물질 선택" 기능이 RAG 청크를 뒤지지 않고 이 가벼운 목록에서 바로 찾게 하기
+    위함(청크는 문서 조각이라 물질 단위 브라우징에 안 맞음)."""
     _TEXT_DIR.mkdir(parents=True, exist_ok=True)
     count = 0
+    catalog: list[dict] = []
     with jsonl_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -130,15 +142,59 @@ def ingest(jsonl_path: Path, limit: int | None = None) -> int:
                 continue
             rec = json.loads(line)
             chem_id = rec.get("chem_id", "")
-            name = _safe_name(rec.get("name_ko", "unknown"))
-            out_path = _TEXT_DIR / f"msds_{chem_id}_{name}.txt"
+            name_ko = rec.get("name_ko", "unknown")
+            name = _safe_name(name_ko)
+            file_name = f"msds_{chem_id}_{name}.txt"
+            out_path = _TEXT_DIR / file_name
             out_path.write_text(_format_record(rec), encoding="utf-8")
+            catalog.append({
+                "chem_id": chem_id,
+                "name_ko": name_ko,
+                "name_en": rec.get("name_en", ""),
+                "cas_no": rec.get("cas_no") or "",
+                "file": file_name,
+            })
             count += 1
             if count % 2000 == 0:
                 print(f"  {count}건 적재...")
             if limit and count >= limit:
                 break
+
+    _CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CATALOG_PATH.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+    print(f"카탈로그 저장: {_CATALOG_PATH} ({len(catalog)}건)")
     return count
+
+
+def check_for_updates(write_status: bool = True) -> dict:
+    """huggingface.co API로 데이터셋의 현재 최신 커밋(sha)을 조회해서 우리가 받아둔
+    _HF_REVISION과 비교한다. 자동으로 재다운로드·재인덱싱하지는 않는다 — 48,966건
+    재처리 + FAISS 재구축은 무거운 작업이라 사람이 보고 판단해야 한다(이 함수는
+    "새 버전이 있다"를 알려주는 용도까지만).
+
+    호출 실패(네트워크 등)도 조용히 삼키지 않고 status에 남긴다 — healthcheck류
+    패턴과 동일(이 프로젝트 전반의 원칙, alerts.log 참고)."""
+    result = {
+        "checked_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "pinned_revision": _HF_REVISION,
+        "latest_revision": None,
+        "up_to_date": None,
+        "error": None,
+    }
+    req = urllib.request.Request(_HF_API_URL, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = data.get("sha")
+        result["latest_revision"] = latest
+        result["up_to_date"] = (latest == _HF_REVISION) if latest else None
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
+        result["error"] = str(e)
+
+    if write_status:
+        _SYNC_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SYNC_STATUS_PATH.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
 
 
 def main() -> None:
@@ -146,13 +202,20 @@ def main() -> None:
     parser.add_argument("--jsonl", default=str(_RAW_MSDS_DIR / "inconvenience-msds_train.jsonl"))
     parser.add_argument("--limit", type=int, default=None, help="테스트용 — 앞 N건만 적재")
     parser.add_argument("--skip-download", action="store_true")
+    parser.add_argument("--check-updates-only", action="store_true", help="다운로드·적재 없이 최신 리비전만 확인")
     args = parser.parse_args()
+
+    if args.check_updates_only:
+        result = check_for_updates()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
 
     jsonl_path = Path(args.jsonl)
     if not args.skip_download:
         download(jsonl_path)
 
     count = ingest(jsonl_path, limit=args.limit)
+    check_for_updates()
     print(f"완료 — {count}건을 {_TEXT_DIR}에 적재")
 
 

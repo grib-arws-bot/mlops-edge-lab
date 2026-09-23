@@ -3,11 +3,13 @@
 2026-09-23 huggingface.co/datasets/Yuyongkim/inconvenience-msds에서 실제로
 받아본 응답의 첫 레코드(chem_id 000001)를 그대로 옮겨온 것."""
 
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from collect import msds_hf_ingest
 from collect.msds_hf_ingest import _format_record, _safe_name
 
 _SAMPLE = {
@@ -52,3 +54,35 @@ def test_format_record_handles_missing_sections_list():
 def test_safe_name_strips_slashes_and_parens_kept():
     assert "/" not in _safe_name("a/b(c)")
     assert "\\" not in _safe_name("a\\b")
+
+
+def test_safe_name_bounds_utf8_byte_length():
+    # 2026-09-23 실측 버그: 문자 수만 자르면 한글(3바이트/글자)이 파일시스템의
+    # 255바이트 파일명 제한을 넘길 수 있었다 — 바이트 단위로 잘려야 한다.
+    long_korean = "가" * 200
+    safe = _safe_name(long_korean, max_bytes=80)
+    assert len(safe.encode("utf-8")) <= 80
+
+
+def test_ingest_writes_text_files_and_catalog(tmp_path, monkeypatch):
+    text_dir = tmp_path / "text"
+    catalog_path = tmp_path / "msds_catalog.json"
+    monkeypatch.setattr(msds_hf_ingest, "_TEXT_DIR", text_dir)
+    monkeypatch.setattr(msds_hf_ingest, "_CATALOG_PATH", catalog_path)
+
+    jsonl_path = tmp_path / "sample.jsonl"
+    jsonl_path.write_text(
+        json.dumps(_SAMPLE, ensure_ascii=False) + "\n"
+        + json.dumps({"chem_id": "000002", "name_ko": "물질2", "cas_no": "1-1-1", "name_en": "Chem2", "sections": []}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    count = msds_hf_ingest.ingest(jsonl_path)
+
+    assert count == 2
+    written = list(text_dir.glob("msds_*.txt"))
+    assert len(written) == 2
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert len(catalog) == 2
+    assert catalog[0]["chem_id"] == "000001"
+    assert catalog[0]["cas_no"] == "50-01-1"
