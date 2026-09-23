@@ -117,7 +117,7 @@ document.getElementById('gen-topic-btn').addEventListener('click', async () => {
   const statusEl = document.getElementById('opinions-status');
   statusEl.textContent = '↺ 주제 생성 중...';
   try {
-    const res = await fetch('/api/edu-admin/debate/topic', {
+    const res = await fetch('/mlops/api/edu-admin/debate/topic', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({keyword}),
     });
     const data = await res.json();
@@ -157,7 +157,7 @@ document.getElementById('gen-opinions-btn').addEventListener('click', async () =
   document.getElementById('reassign-teams-btn').style.display = 'none';
 
   try {
-    const res = await fetch('/api/edu-admin/debate/opinions', {
+    const res = await fetch('/mlops/api/edu-admin/debate/opinions', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({topic, num_students: numStudents}),
     });
@@ -206,7 +206,7 @@ async function runAssignTeams(seed) {
   document.getElementById('summary-line').textContent = '';
   document.getElementById('summary-text').textContent = '';
 
-  const res = await fetch('/api/edu-admin/debate/teams', {
+  const res = await fetch('/mlops/api/edu-admin/debate/teams', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       topic: debateTopic, students: debateStudents, team_count: teamCount, seed,
@@ -321,7 +321,7 @@ document.getElementById('conclude-btn').addEventListener('click', async () => {
   statusEl.textContent = '↺ 토론 후 의견 수집 중... (수십 초 소요)';
 
   try {
-    const res = await fetch('/api/edu-admin/debate/conclude', {
+    const res = await fetch('/mlops/api/edu-admin/debate/conclude', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({topic: debateTopic, students: debateStudents, teams: debateTeams}),
     });

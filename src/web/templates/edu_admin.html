@@ -188,7 +188,7 @@ function escapeHtml(s) {
 function reloadWithSchoolSubject() {
   const school = document.getElementById('school-level-select').value;
   const subject = document.getElementById('subject-select').value;
-  window.location.href = `/edu-admin?school_level=${encodeURIComponent(school)}&subject=${encodeURIComponent(subject)}`;
+  window.location.href = `/mlops/edu-admin?school_level=${encodeURIComponent(school)}&subject=${encodeURIComponent(subject)}`;
 }
 document.getElementById('school-level-select').addEventListener('change', reloadWithSchoolSubject);
 document.getElementById('subject-select').addEventListener('change', reloadWithSchoolSubject);
@@ -285,7 +285,7 @@ function renderJobStatus(job) {
 }
 
 async function pollJobStatus() {
-  const res = await fetch('/api/edu-admin/status');
+  const res = await fetch('/mlops/api/edu-admin/status');
   renderJobStatus(await res.json());
 }
 
@@ -313,7 +313,7 @@ trainBtn.addEventListener('click', async () => {
   }
 
   trainBtn.disabled = true;
-  const res = await fetch('/api/edu-admin/train', {
+  const res = await fetch('/mlops/api/edu-admin/train', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({sources, license_override_ack: ack}),
   });
@@ -371,7 +371,7 @@ document.querySelectorAll('.ask-btn').forEach(btn => {
     sourcesEl.innerHTML = '';
 
     try {
-      const res = await fetch('/api/edu-admin/ask', {
+      const res = await fetch('/mlops/api/edu-admin/ask', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({question, mode, school_level: currentSchoolLevel(), subject: currentSubject()}),
       });
@@ -486,7 +486,7 @@ quizBtn.addEventListener('click', async () => {
   quizExplanationEl.style.display = 'none';
 
   try {
-    const res = await fetch('/api/edu-admin/quiz', {
+    const res = await fetch('/mlops/api/edu-admin/quiz', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({question, school_level: currentSchoolLevel(), subject: currentSubject()}),
     });

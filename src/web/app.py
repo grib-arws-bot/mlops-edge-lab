@@ -1247,8 +1247,11 @@ def _run_cosmetics_emulated(question: str, cores: int, mem_gb: int, gpu: bool, l
 @app.get("/simulate")
 def simulate_form():
     """/simulate를 통합관제 페이지로 합쳤다(2026-09-19, 사용자 요청) — 예전 링크·북마크가
-    깨지지 않게 리다이렉트만 남겨둔다."""
-    return RedirectResponse(url="/control-room")
+    깨지지 않게 리다이렉트만 남겨둔다. 리다이렉트 대상은 브라우저가 보는 전체 경로라
+    "/mlops" 프리픽스를 붙여야 한다(2026-09-24, Evidently를 루트로 내주고 이 앱을
+    /mlops 밑으로 옮기면서 — 의사결정_로그 128번) — nginx가 벗겨주는 건 들어오는
+    요청뿐이고, 우리가 브라우저에 돌려주는 URL은 우리가 직접 프리픽스를 챙겨야 한다."""
+    return RedirectResponse(url="/mlops/control-room")
 
 
 @app.post("/api/judge")

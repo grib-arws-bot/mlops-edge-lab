@@ -144,7 +144,7 @@ function renderLog(recent) {
 
 async function refreshBidradarStats() {
   try {
-    const res = await fetch('/api/bidradar/stats');
+    const res = await fetch('/mlops/api/bidradar/stats');
     const data = await res.json();
     renderCards(data.endpoints);
     renderDailyChart(data.daily || []);

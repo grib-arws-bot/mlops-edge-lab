@@ -160,7 +160,7 @@ function renderRagDrift(d) {
       const resultEl = document.getElementById('rag-drift-result');
       resultEl.textContent = '↺ 되돌리는 중...';
       try {
-        const res = await fetch('/api/rag-drift/rollback', { method: 'POST' });
+        const res = await fetch('/mlops/api/rag-drift/rollback', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
           resultEl.innerHTML = `<span style="color:var(--normal);">✓ v${data.rolled_back_from} → v${data.rolled_back_to}로 되돌렸습니다.</span>`;
@@ -218,7 +218,7 @@ document.getElementById('auto-toggle-btn').addEventListener('click', async () =>
   btn.dataset.enabled = nextEnabled ? '1' : '0';
   document.getElementById('auto-stopped-note').style.display = nextEnabled ? 'none' : 'block';
   try {
-    await fetch('/api/control-room/auto-toggle', {
+    await fetch('/mlops/api/control-room/auto-toggle', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({enabled: nextEnabled}),
     });
@@ -254,7 +254,7 @@ function announceAlert(site, narrative) {
 async function refreshControlRoom() {
   let data;
   try {
-    const res = await fetch('/api/control-room/status');
+    const res = await fetch('/mlops/api/control-room/status');
     data = await res.json();
   } catch (e) {
     return;
@@ -342,7 +342,7 @@ setInterval(refreshControlRoom, 5000);
 document.getElementById('edge_profile').addEventListener('change', async (e) => {
   userChangedProfile = true;
   try {
-    await fetch('/api/control-room/edge-profile', {
+    await fetch('/mlops/api/control-room/edge-profile', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({edge_profile: e.target.value}),
     });
@@ -453,7 +453,7 @@ function renderSlotResult(slot, record) {
 // 정확한 매칭은 아니고 "최근 걸 순서대로 보여주는" 정도의 참고용이다.
 (async () => {
   try {
-    const res = await fetch('/api/simulate/history');
+    const res = await fetch('/mlops/api/simulate/history');
     const data = await res.json();
     const history = data.history || [];
     document.querySelectorAll('.slot-card').forEach((slot, i) => {
@@ -505,7 +505,7 @@ async function runSlot(slot) {
   runBtn.textContent = '실행 중...';
   try {
     // ① 즉시 반응: 규칙 기반 판정 + 장비 상태
-    const judgeResult = await fetchJsonWithRetry('/api/judge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors})});
+    const judgeResult = await fetchJsonWithRetry('/mlops/api/judge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors})});
     if (!judgeResult.ok || !judgeResult.data.equipment) {
       showError('장비 상태 조회 실패(네트워크 문제일 수 있음): ' + (judgeResult.error || '서버가 예상과 다른 응답을 줬습니다'));
       return;
@@ -521,7 +521,7 @@ async function runSlot(slot) {
     }, 100);
 
     const edgeProfile = slot.querySelector('.slot-edge-profile').value;
-    const narrateResult = await fetchJsonWithRetry('/api/narrate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors, edge_profile: edgeProfile})}, 2);
+    const narrateResult = await fetchJsonWithRetry('/mlops/api/narrate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sensors, edge_profile: edgeProfile})}, 2);
     clearInterval(timer);
     sw.style.display = 'none';
 

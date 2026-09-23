@@ -418,7 +418,7 @@ async function triggerAgentRecommendation(tick, hoursIgnored, myGen) {
     : `지금 진행 중인 발효 탱크(로트 FMT-20260920-01)의 DO가 ${tick.DO_평균_pct}%로 떨어졌습니다. SOP 최소 기준(${SOP_DO_MIN}%) 미만인데, 지금 이 배치를 재작업으로 판정해서 종료해도 될까요?`;
   const startedAt = performance.now();
   try {
-    const res = await fetch('/api/cosmetics/ask', {
+    const res = await fetch('/mlops/api/cosmetics/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question, edge_profile: selectedEdgeProfile() }),
     });
@@ -467,7 +467,7 @@ async function finishBatchNormally() {
   renderStage4();
   const startedAt = performance.now();
   try {
-    const res = await fetch('/api/cosmetics/ask', {
+    const res = await fetch('/mlops/api/cosmetics/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         question: '지금 진행 중인 발효 탱크(로트 FMT-20260920-01)가 이상 없이 정상 종료되었습니다. COA 초안을 만들어 주세요.',
@@ -508,7 +508,7 @@ async function approveAction() {
 
   let rpmText = '교반 RPM 상향';
   try {
-    const res = await fetch('/api/cosmetics/predict', {
+    const res = await fetch('/mlops/api/cosmetics/predict', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ process: '미생물 발효' }),
     });
@@ -715,7 +715,7 @@ async function askAgent() {
     // 문제가 있었냐" 같은 질문에 답할 수 있다 — 이 데이터는 브라우저에서만 생성되고
     // 서버에는 원래 전혀 전달되지 않아서, 이전에는 이런 질문에 무조건 "근거를 찾지
     // 못했습니다"로 답할 수밖에 없었다(사용자 지적, 2026-09-23).
-    const res = await fetch('/api/cosmetics/ask', {
+    const res = await fetch('/mlops/api/cosmetics/ask', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({question: q, live_ticks: logRows}),
     });
