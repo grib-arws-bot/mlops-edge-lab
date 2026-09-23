@@ -652,12 +652,48 @@ def quality(request: Request):
 # 기능을 제공한다. 소스 범위는 별도 필드를 새로 만들지 않고 파일명 접두어
 # (msds_<id>_...)로 구분한다 — 인덱스를 다시 만들 필요 없이 파일명 규칙만으로 걸러낸다.
 # ────────────────────────────────────────────────────────────────
+def _msds_display_name(source: str, catalog_by_id: dict) -> str:
+    """검색 결과의 출처 표시명을 사람이 읽기 좋게 — MSDS 청크는 파일명(msds_<id>_
+    <물질명 일부, 바이트 절단됨>)을 그대로 보여주는 대신 카탈로그의 온전한
+    물질명으로 대체한다(사용자 지적, 2026-09-23: 출처 표를 예쁘게). 산업안전
+    원본은 원래 파일명 stem을 그대로 쓴다(그 자체가 문서명이라 손댈 이유가 없음)."""
+    if source.startswith("msds_"):
+        chem_id = source.split("_", 2)[1] if source.count("_") >= 2 else ""
+        entry = catalog_by_id.get(chem_id)
+        if entry:
+            return f"{entry['name_ko']} (CAS {entry['cas_no'] or '없음'})"
+    return source
+
+
 def _msds_source_filter(scope: str):
     if scope == "msds":
         return lambda m: m["source"].startswith("msds_")
     if scope == "safety":
         return lambda m: not m["source"].startswith("msds_")
     return None  # "all" — 필터 없음
+
+
+def _msds_source_summary() -> dict:
+    """사용자 질문("산업안전과 MSDS가 가지고 있는 데이터가 다른 것인가?")에 화면이
+    직접 답하도록 — 두 도메인이 실제로 서로 다른 원본(수집 경로·문서 성격 자체가
+    다름)이라는 걸 문서 수·청크 수까지 실측해서 보여준다."""
+    meta = _state.get("safety_meta") or []
+    msds_sources = {m["source"] for m in meta if m["source"].startswith("msds_")}
+    safety_sources = {m["source"] for m in meta if not m["source"].startswith("msds_")}
+    return {
+        "safety": {
+            "label": "산업안전 원본",
+            "origin": "직접 수집한 안전 가이드라인 문서 — 법령·표준·사내 안전수칙·장비 매뉴얼(PDF/HWP/XLSX 등, data/raw)",
+            "doc_count": len(safety_sources),
+            "chunk_count": sum(1 for m in meta if not m["source"].startswith("msds_")),
+        },
+        "msds": {
+            "label": "MSDS(물질안전보건자료)",
+            "origin": "한국산업안전보건공단(KOSHA) 공식 API로 수집된 공개 데이터셋(HuggingFace, Yuyongkim/inconvenience-msds) 경유 — 화학물질 1건당 16개 표준 항목",
+            "doc_count": len(_state.get("msds_catalog") or []),
+            "chunk_count": sum(1 for m in meta if m["source"].startswith("msds_")),
+        },
+    }
 
 
 @app.get("/msds", response_class=HTMLResponse)
@@ -673,6 +709,7 @@ def msds_page(request: Request):
         "index_available": _state.get("safety_index") is not None,
         "sync_status": sync_status,
         "update_job_status": _msds_update_job_status(),
+        "source_summary": _msds_source_summary(),
     })
 
 
@@ -690,6 +727,21 @@ def msds_autocomplete(q: str = ""):
     return JSONResponse({"results": matches})
 
 
+_MSDS_SECTION_PATTERN = re.compile(r"^\[(\d+)\.\s*(.+?)\]\n(.*?)(?=\n\[\d+\.|\Z)", re.MULTILINE | re.DOTALL)
+
+
+def _parse_msds_sections(text: str) -> list[dict]:
+    """msds_hf_ingest._format_record()가 쓴 "[N. 제목]\\n내용" 포맷을 다시 구조화된
+    목록으로 되돌린다 — 화면에 16개 항목 표로 보여주기 위함(사용자 요청,
+    2026-09-23: "하단 물질 설명은 표 형태로 예쁘게 만들어 줘"). 원본 JSONL 레코드를
+    다시 읽는 대신 이미 저장해둔 텍스트를 정규식으로 되파싱하는 쪽을 택함 —
+    적재 시점에 구조를 이중 저장(캐시 불일치 위험)하지 않아도 된다."""
+    return [
+        {"no": int(m.group(1)), "title": m.group(2).strip(), "text": m.group(3).strip()}
+        for m in _MSDS_SECTION_PATTERN.finditer(text)
+    ]
+
+
 @app.get("/api/msds/detail/{chem_id}")
 def msds_detail(chem_id: str):
     catalog = _state.get("msds_catalog") or []
@@ -699,7 +751,8 @@ def msds_detail(chem_id: str):
     path = _MSDS_TEXT_DIR / entry["file"]
     if not path.exists():
         return JSONResponse({"error": "원문 파일이 없습니다"}, status_code=404)
-    return JSONResponse({"entry": entry, "text": path.read_text(encoding="utf-8")})
+    text = path.read_text(encoding="utf-8")
+    return JSONResponse({"entry": entry, "sections": _parse_msds_sections(text)})
 
 
 def _msds_update_job_status() -> dict:
@@ -799,8 +852,13 @@ async def msds_search(request: Request):
         return hits, answer_text
 
     hits, answer_text = await loop.run_in_executor(None, _run)
+    catalog_by_id = {c["chem_id"]: c for c in (_state.get("msds_catalog") or [])}
     results = [
-        {"source": h["source"], "chunk_id": h["chunk_id"], "text": h["text"], "score": round(score, 3)}
+        {
+            "source": h["source"], "chunk_id": h["chunk_id"], "text": h["text"], "score": round(score, 3),
+            "display_name": _msds_display_name(h["source"], catalog_by_id),
+            "is_msds": h["source"].startswith("msds_"),
+        }
         for h, score in hits
     ]
     return JSONResponse({"answer": answer_text, "results": results})
