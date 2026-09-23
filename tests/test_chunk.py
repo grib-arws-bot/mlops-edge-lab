@@ -44,3 +44,38 @@ def test_no_newline_no_punctuation_hard_sliced():
     assert len(chunks) > 1
     for c in chunks:
         assert len(c) <= 200
+
+
+def test_section_markers_never_split_title_from_body():
+    # 실사용 버그(2026-09-23): MSDS처럼 "[N. 제목]\n본문" 구조인 문서를 줄바꿈
+    # 기준 고정 길이로만 패킹하면 "[4. 응급조치 요령]"이라는 제목만 있고 본문은
+    # 다음 청크로 넘어가는 식으로 잘려서 검색 결과가 "짤려 보이는" 문제가 실제
+    # 사용자 검색에서 확인됐다. 짧은 구획(전체가 target_size 이내)은 항상 제목+
+    # 본문이 같은 청크에 붙어 있어야 한다.
+    text = "\n".join([
+        "물질명: 테스트물질",
+        "[1. 화학제품과 회사에 관한 정보]",
+        "제품명: 테스트물질",
+        "[2. 유해성·위험성]",
+        "급성 독성이 있음",
+        "[3. 구성성분의 명칭 및 함유량]",
+        "물질명: 테스트물질 100%",
+    ])
+    chunks = chunk_text(text, target_size=60, overlap=0)
+    # 각 구획(제목+본문)이 어느 청크에 있든, "제목만 있고 본문이 없는" 청크가
+    # 없어야 한다 — 제목 다음 줄(본문)이 항상 같은 청크 안에 있는지로 검증.
+    for title, body in [("[1. 화학제품과 회사에 관한 정보]", "제품명: 테스트물질"),
+                         ("[2. 유해성·위험성]", "급성 독성이 있음"),
+                         ("[3. 구성성분의 명칭 및 함유량]", "물질명: 테스트물질 100%")]:
+        owner = next(c for c in chunks if title in c)
+        assert body in owner, f"{title!r}의 본문이 다른 청크로 잘려나감: {chunks!r}"
+
+
+def test_no_section_markers_unaffected():
+    # 마커가 아예 없는 일반 산업안전 문서는 기존 줄바꿈 기준 패킹 그대로 동작해야
+    # 한다(회귀 방지 — 이 변경이 MSDS 외 문서에 영향을 주면 안 됨).
+    text = "\n".join(["문단 " + str(i) * 50 for i in range(6)])
+    chunks = chunk_text(text, target_size=200)
+    assert len(chunks) > 1
+    for c in chunks:
+        assert len(c) <= 250

@@ -12,6 +12,27 @@ _TARGET_SIZE = 700
 _OVERLAP = 100
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_SECTION_MARKER = re.compile(r"^\[\d+\.\s")
+
+
+def _group_by_section_markers(paragraphs: list[str]) -> list[str]:
+    """`[N. 제목]` 같은 구획 마커로 시작하는 줄을 만나면 새 블록을 연다 — MSDS처럼
+    문서 안에 명확한 항목 구분이 있는 텍스트(collect/msds_hf_ingest.py가 쓰는
+    포맷)에서, 그 구획 하나를 쪼개지지 않는 최소 단위로 다뤄야 "[4. 응급조치
+    요령]"처럼 제목만 있고 본문은 다음 청크로 넘어가버리는 식으로 잘리지 않는다
+    (사용자 실측, 2026-09-23: 실제 검색 결과가 항목 제목 직후에서 끊겨 나오는 걸
+    확인함 — 줄바꿈 기준 고정 길이 패킹만으로는 구획 경계를 모른다)."""
+    blocks: list[str] = []
+    current: list[str] = []
+    for p in paragraphs:
+        if _SECTION_MARKER.match(p) and current:
+            blocks.append("\n".join(current))
+            current = [p]
+        else:
+            current.append(p)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
 
 
 def _split_long_paragraph(para: str, target_size: int) -> list[str]:
@@ -35,8 +56,10 @@ def chunk_text(text: str, target_size: int = _TARGET_SIZE, overlap: int = _OVERL
     # 청크가 됐다(2026-09-20 발견, 의도적으로 미뤄둔 버그) — 문단 단위로 나눈 뒤에도
     # target_size를 넘는 조각은 문장 경계로 한 번 더 쪼갠다.
     raw_paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+    units = _group_by_section_markers(raw_paragraphs) if any(_SECTION_MARKER.match(p) for p in raw_paragraphs) else raw_paragraphs
+
     paragraphs: list[str] = []
-    for p in raw_paragraphs:
+    for p in units:
         paragraphs.extend(_split_long_paragraph(p, target_size))
 
     chunks: list[str] = []
