@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -30,7 +31,11 @@ _LOG_PATH = _ROOT / "data" / "processed" / "retrieval_query_log.jsonl"
 _BACKUP_PATH = _ROOT / "data" / "processed" / "retrieval_query_log.jsonl._seed_drift_demo.bak"
 
 _N_SEED_ROWS = 30
-_SHIFTED_SCORE = 0.35  # reference(골든셋) 평균보다 뚜렷이 낮은 값으로 인위적으로 이동시킴
+# reference(2026-09-24 기준 n=116, 평균 0.90) 대비 현실적인 "중간 정도 저하" 시나리오로
+# 조정(의사결정_로그 125번) — 처음엔 0.35로 아예 안 겹치게 잡아서 PSI가 14~17까지
+# 튀었다. 실측해보니 reference 범위(0.85~0.95) 바로 아래로 걸치는 값이 두 자릿수보다
+# 훨씬 "있을 법한" 크기(대략 10~11)의 PSI를 만든다.
+_SHIFTED_LOW, _SHIFTED_HIGH = 0.72, 0.84
 
 
 def seed() -> None:
@@ -46,11 +51,12 @@ def seed() -> None:
         _BACKUP_PATH.write_text("", encoding="utf-8")
         print("기존 로그가 없었습니다 — restore 시 빈 파일로 되돌리도록 빈 백업을 만듭니다.")
 
+    rng = random.Random(0)
     with _LOG_PATH.open("a", encoding="utf-8") as f:
         for i in range(_N_SEED_ROWS):
             row = {
                 "ts": f"1970-01-01T00:{i // 60:02d}:{i % 60:02d}+00:00",
-                "top1_score": round(_SHIFTED_SCORE + (i % 5) * 0.01, 4),
+                "top1_score": round(rng.uniform(_SHIFTED_LOW, _SHIFTED_HIGH), 4),
                 "query_len": 10,
                 "_seed_drift_demo": True,  # 실 로그 레코드와 구분용 — 운영 코드는 이 필드를 읽지 않음
             }
