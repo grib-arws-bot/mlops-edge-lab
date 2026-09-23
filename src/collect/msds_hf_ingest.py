@@ -46,9 +46,15 @@ _EXPECTED_SHA256 = "2c342e638e403540076f0e0d13d0018f7671b11747b5a40cb67a5245d13a
 _SECTION_ORDER = list(range(1, 17))
 
 
-def _safe_name(name: str) -> str:
+def _safe_name(name: str, max_bytes: int = 80) -> str:
+    """파일명으로 안전하게 쓸 문자열로 정리 — 2026-09-23 실측: 문자 수(120자)로만
+    잘랐더니 한글은 UTF-8로 1글자당 3바이트라 파일시스템의 255바이트 파일명 제한을
+    넘겨 `OSError: File name too long`으로 2,355건째에서 전체가 죽었다. 바이트
+    단위로 안전하게(멀티바이트 문자 중간을 자르지 않게) 잘라야 한다."""
     name = name.replace("/", "__").replace("\\", "__")
-    return re.sub(r"[^\w가-힣().-]+", "_", name)[:120]
+    name = re.sub(r"[^\w가-힣().-]+", "_", name)
+    encoded = name.encode("utf-8")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore")
 
 
 def _sha256(path: Path) -> str:
