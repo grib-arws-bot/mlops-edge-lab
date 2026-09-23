@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}MSDS | MLOps-Edge-Lab{% endblock %}
+{% block content %}
+<style>
+  .msds-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 1000px) { .msds-layout { grid-template-columns: 1fr; } }
+  .msds-result-item { padding: 8px 10px; border-bottom: 1px dashed var(--border); cursor: pointer; font-size: 0.85rem; }
+  .msds-result-item:hover { background: rgba(79,140,255,0.08); }
+  .msds-result-item:last-child { border-bottom: none; }
+  .msds-result-item .name { font-weight: 600; }
+  .msds-result-item .cas { color: var(--muted); font-size: 0.78rem; margin-left: 6px; }
+  .msds-detail-text { white-space: pre-wrap; font-size: 0.85rem; line-height: 1.55; max-height: 520px; overflow-y: auto; background: #0c0e12; border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-top: 10px; }
+  .msds-search-hit { padding: 10px 0; border-bottom: 1px dashed var(--border); }
+  .msds-search-hit:last-child { border-bottom: none; }
+  .msds-search-hit .src { font-size: 0.78rem; color: var(--accent); font-weight: 600; }
+  .msds-search-hit .score { color: var(--muted); font-size: 0.74rem; margin-left: 6px; }
+  .msds-search-hit .text { font-size: 0.84rem; margin-top: 4px; white-space: pre-wrap; }
+  .msds-scope-select { max-width: 220px; }
+  .sync-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.72rem; margin-left: 8px; border: 1px solid var(--border); }
+  .sync-badge.ok { color: var(--normal); border-color: var(--normal); }
+  .sync-badge.stale { color: var(--caution); border-color: var(--caution); }
+  .sync-badge.unknown { color: var(--muted); }
+</style>
+
+<div class="page-header">
+  <div>
+    <h1>MSDS 검색</h1>
+    <h2 style="margin-bottom:0;">
+      물질안전보건자료(KOSHA) {{ catalog_count }}건을 물질 단위로 바로 조회하거나, 산업안전 문서 전체(MSDS 포함)에서 RAG로 검색합니다.
+      {% if sync_status %}
+        {% if sync_status.error %}
+        <span class="sync-badge unknown">최신본 확인 실패</span>
+        {% elif sync_status.up_to_date == true %}
+        <span class="sync-badge ok">최신본과 일치({{ sync_status.checked_at.split('T')[0] }} 확인)</span>
+        {% elif sync_status.up_to_date == false %}
+        <span class="sync-badge stale">새 버전 있음 — 재수집 검토 필요</span>
+        {% else %}
+        <span class="sync-badge unknown">최신본 확인 안 됨</span>
+        {% endif %}
+      {% endif %}
+    </h2>
+  </div>
+</div>
+
+{% if not index_available %}
+<div class="card">
+  <strong>인덱스 없음</strong>
+  <div class="why">아직 RAG 인덱스가 준비되지 않았습니다 — 서버에서 <code>rag/build_index.py</code>를 실행해야 합니다. 물질 선택(카탈로그 조회)은 인덱스 없이도 동작합니다.</div>
+</div>
+{% endif %}
+
+<div class="msds-layout">
+  <div class="card">
+    <strong>1. 물질 선택</strong>
+    <div class="why">물질명·영문명·CAS 번호로 찾아서 MSDS 16개 항목 원문을 그대로 봅니다(검색이 아니라 카탈로그 조회라 즉시 결과가 나옵니다).</div>
+    <input type="text" id="msds-search-input" placeholder="예: 벤젠, Benzene, 71-43-2" style="margin-top:8px;">
+    <div id="msds-autocomplete-list" style="margin-top:8px; max-height:280px; overflow-y:auto;"></div>
+    <div id="msds-detail-area"></div>
+  </div>
+
+  <div class="card">
+    <strong>2. 전체 소스에서 검색</strong>
+    <div class="why">질문이나 키워드로 관련 조각을 찾습니다 — 산업안전 원본 문서와 MSDS를 함께, 또는 범위를 좁혀서 검색할 수 있습니다.</div>
+    <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+      <select id="msds-scope-select" class="msds-scope-select">
+        <option value="all">전체 소스(산업안전+MSDS)</option>
+        <option value="msds">MSDS만</option>
+        <option value="safety">산업안전 원본만</option>
+      </select>
+    </div>
+    <input type="text" id="msds-query-input" placeholder="예: 벤젠 취급 시 보호구는?" style="margin-top:8px;">
+    <button type="button" id="msds-search-btn" style="margin-top:8px;">검색</button>
+    <div id="msds-search-status" class="stat" style="margin-top:8px;"></div>
+    <div id="msds-search-results" style="margin-top:8px; max-height:440px; overflow-y:auto;"></div>
+  </div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+let acTimer = null;
+document.getElementById('msds-search-input').addEventListener('input', (e) => {
+  clearTimeout(acTimer);
+  const q = e.target.value.trim();
+  const list = document.getElementById('msds-autocomplete-list');
+  if (q.length < 1) { list.innerHTML = ''; return; }
+  acTimer = setTimeout(async () => {
+    const res = await fetch(`/api/msds/autocomplete?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    list.innerHTML = data.results.map(r => `
+      <div class="msds-result-item" data-chem-id="${escapeHtml(r.chem_id)}">
+        <span class="name">${escapeHtml(r.name_ko)}</span><span class="cas">${escapeHtml(r.cas_no || '')}</span>
+      </div>`).join('') || '<div class="stat">일치하는 물질이 없습니다.</div>';
+    list.querySelectorAll('.msds-result-item').forEach(el => {
+      el.addEventListener('click', () => loadMsdsDetail(el.dataset.chemId));
+    });
+  }, 250);
+});
+
+async function loadMsdsDetail(chemId) {
+  const area = document.getElementById('msds-detail-area');
+  area.innerHTML = '<div class="stat" style="margin-top:10px;">불러오는 중...</div>';
+  const res = await fetch(`/api/msds/detail/${encodeURIComponent(chemId)}`);
+  const data = await res.json();
+  if (!res.ok) { area.innerHTML = `<div class="stat" style="margin-top:10px;">${escapeHtml(data.error || '조회 실패')}</div>`; return; }
+  area.innerHTML = `
+    <div class="stat" style="margin-top:10px; font-weight:600;">${escapeHtml(data.entry.name_ko)} (${escapeHtml(data.entry.name_en || '')}) — CAS ${escapeHtml(data.entry.cas_no || '없음')}</div>
+    <div class="msds-detail-text">${escapeHtml(data.text)}</div>`;
+}
+
+document.getElementById('msds-search-btn').addEventListener('click', async () => {
+  const query = document.getElementById('msds-query-input').value.trim();
+  const scope = document.getElementById('msds-scope-select').value;
+  const statusEl = document.getElementById('msds-search-status');
+  const resultsEl = document.getElementById('msds-search-results');
+  if (!query) { statusEl.textContent = '검색어를 입력하세요.'; return; }
+  statusEl.textContent = '↺ 검색 중...';
+  resultsEl.innerHTML = '';
+  try {
+    const res = await fetch('/api/msds/search', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query, scope}),
+    });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || '검색 실패'; return; }
+    statusEl.textContent = `완료 — ${data.results.length}건`;
+    resultsEl.innerHTML = data.results.map(r => `
+      <div class="msds-search-hit">
+        <span class="src">${escapeHtml(r.source)}</span><span class="score">score=${r.score}</span>
+        <div class="text">${escapeHtml(r.text)}</div>
+      </div>`).join('') || '<div class="stat">결과가 없습니다.</div>';
+  } catch (e) {
+    statusEl.textContent = '검색 중 오류가 발생했습니다.';
+  }
+});
+
+document.getElementById('msds-query-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('msds-search-btn').click();
+});
+</script>
+{% endblock %}

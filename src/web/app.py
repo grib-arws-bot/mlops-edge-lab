@@ -32,6 +32,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import faiss
 import llama_cpp
 from llama_cpp import Llama
 import numpy as np
@@ -46,6 +47,7 @@ from agent.run import judge_and_actuate, narrate, preview, run_agent, run_agent_
 from agent.tools import ToolContext
 from collect import registry as collect_registry
 from collect.storage import collection_summary
+from rag import query as rag_query
 from rag import query_edu
 from rag.chunk import chunk_text
 from sensors import CATEGORIES, LOCS, SEVERITY_RATIO, VALUE_CEILING, is_lower_is_worse, substance_lookup
@@ -68,6 +70,12 @@ _DECK_PPTX = _ROOT / "docs" / "교육자료" / "MLOps-Edge-Lab_교육자료_v5.p
 _STATIC_DIR = _HERE / "static"
 _DECK_PDF = _STATIC_DIR / "deck.pdf"
 _STATIC_DIR.mkdir(parents=True, exist_ok=True)
+
+_SAFETY_INDEX_PATH = _ROOT / "data" / "processed" / "rag_index.faiss"
+_SAFETY_META_PATH = _ROOT / "data" / "processed" / "rag_chunks.jsonl"
+_MSDS_CATALOG_PATH = _ROOT / "data" / "processed" / "msds_catalog.json"
+_MSDS_SYNC_STATUS_PATH = _ROOT / "data" / "processed" / "msds_sync_status.json"
+_MSDS_TEXT_DIR = _ROOT / "data" / "processed" / "text"
 
 _state: dict = {}
 
@@ -247,6 +255,36 @@ def _load_edu_rag_or_disable() -> None:
         _state["edu_bm25"] = None
 
 
+def _load_safety_rag_or_disable() -> None:
+    """산업안전 RAG 인덱스(2026-09-23부터 MSDS 48,966건 통합)가 없으면 조용히
+    숨기지 않고 /msds 화면에서 명시한다 — 교육 RAG와 같은 원칙
+    (_load_edu_rag_or_disable 참고). 임베딩 모델은 edu_embed_model과 같은
+    모델(multilingual-e5-small)이지만, 로드 시점이 서로 달라(edu는 인덱스가
+    없으면 아예 안 씀) 별도 인스턴스로 둔다 — 메모리 비용(약 470MB)보다 두
+    도메인을 독립적으로 켜고 끌 수 있는 단순함을 택함."""
+    if not (_SAFETY_INDEX_PATH.exists() and _SAFETY_META_PATH.exists()):
+        _state["safety_embed_model"] = None
+        _state["safety_index"] = None
+        _state["safety_meta"] = None
+        return
+    try:
+        _state["safety_embed_model"] = SentenceTransformer(rag_query.EMBED_MODEL)
+        _state["safety_index"] = faiss.read_index(str(_SAFETY_INDEX_PATH))
+        _state["safety_meta"] = rag_query.load_meta()
+    except Exception as exc:  # noqa: BLE001 — 로드 실패해도 나머지 페이지는 정상 동작해야 함
+        print(f"[startup] 산업안전 RAG 인덱스 로드 실패: {exc}")
+        _state["safety_embed_model"] = None
+        _state["safety_index"] = None
+        _state["safety_meta"] = None
+
+
+def _load_msds_catalog() -> None:
+    if _MSDS_CATALOG_PATH.exists():
+        _state["msds_catalog"] = json.loads(_MSDS_CATALOG_PATH.read_text(encoding="utf-8"))
+    else:
+        _state["msds_catalog"] = []
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _cleanup_orphaned_edge_scopes()
@@ -260,6 +298,8 @@ async def lifespan(_app: FastAPI):
     _bidradar_jobs.update(_load_bidradar_jobs_and_mark_interrupted())
     _save_bidradar_jobs()  # 위에서 "중단됨"으로 바꾼 job이 있으면 그 표시를 파일에도 즉시 반영
     _load_edu_rag_or_disable()
+    _load_safety_rag_or_disable()
+    _load_msds_catalog()
     _ensure_deck_pdf()
     _init_control_room()
     control_room_task = asyncio.create_task(_control_room_loop())
@@ -600,6 +640,90 @@ def _quality_eval_summary() -> dict:
 @app.get("/quality", response_class=HTMLResponse)
 def quality(request: Request):
     return templates.TemplateResponse(request, "quality.html", _quality_eval_summary())
+
+
+# ────────────────────────────────────────────────────────────────
+# MSDS(물질안전보건자료) — 2026-09-23. HuggingFace 공개 데이터셋에서 받은 48,966건을
+# 산업안전 RAG 인덱스에 통합(collect/msds_hf_ingest.py 참고). "물질 선택"(카탈로그
+# 조회 — RAG 없이 즉시 원문 표시)과 "전체 소스 검색"(RAG, 소스 범위 선택 가능) 두
+# 기능을 제공한다. 소스 범위는 별도 필드를 새로 만들지 않고 파일명 접두어
+# (msds_<id>_...)로 구분한다 — 인덱스를 다시 만들 필요 없이 파일명 규칙만으로 걸러낸다.
+# ────────────────────────────────────────────────────────────────
+def _msds_source_filter(scope: str):
+    if scope == "msds":
+        return lambda m: m["source"].startswith("msds_")
+    if scope == "safety":
+        return lambda m: not m["source"].startswith("msds_")
+    return None  # "all" — 필터 없음
+
+
+@app.get("/msds", response_class=HTMLResponse)
+def msds_page(request: Request):
+    sync_status = None
+    if _MSDS_SYNC_STATUS_PATH.exists():
+        try:
+            sync_status = json.loads(_MSDS_SYNC_STATUS_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            sync_status = None
+    return templates.TemplateResponse(request, "msds.html", {
+        "catalog_count": len(_state.get("msds_catalog") or []),
+        "index_available": _state.get("safety_index") is not None,
+        "sync_status": sync_status,
+    })
+
+
+@app.get("/api/msds/autocomplete")
+def msds_autocomplete(q: str = ""):
+    q = q.strip()
+    if len(q) < 1:
+        return JSONResponse({"results": []})
+    catalog = _state.get("msds_catalog") or []
+    q_lower = q.lower()
+    matches = [
+        c for c in catalog
+        if q_lower in c["name_ko"].lower() or q_lower in (c.get("name_en") or "").lower() or q in (c.get("cas_no") or "")
+    ][:20]
+    return JSONResponse({"results": matches})
+
+
+@app.get("/api/msds/detail/{chem_id}")
+def msds_detail(chem_id: str):
+    catalog = _state.get("msds_catalog") or []
+    entry = next((c for c in catalog if c["chem_id"] == chem_id), None)
+    if entry is None:
+        return JSONResponse({"error": "해당 물질을 찾을 수 없습니다"}, status_code=404)
+    path = _MSDS_TEXT_DIR / entry["file"]
+    if not path.exists():
+        return JSONResponse({"error": "원문 파일이 없습니다"}, status_code=404)
+    return JSONResponse({"entry": entry, "text": path.read_text(encoding="utf-8")})
+
+
+@app.post("/api/msds/search")
+async def msds_search(request: Request):
+    payload = await request.json()
+    query = (payload.get("query") or "").strip()
+    scope = payload.get("scope", "all")
+    if not query:
+        return JSONResponse({"error": "검색어를 입력하세요"}, status_code=400)
+    embed_model = _state.get("safety_embed_model")
+    index = _state.get("safety_index")
+    meta = _state.get("safety_meta")
+    if embed_model is None or index is None:
+        return JSONResponse({"error": "인덱스가 아직 준비되지 않았습니다 — 서버에서 rag/build_index.py 실행 필요"}, status_code=503)
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        return rag_query.retrieve(
+            query, embed_model, index, meta, top_k=8, source_filter=_msds_source_filter(scope),
+        )
+
+    hits = await loop.run_in_executor(None, _run)
+    results = [
+        {"source": h["source"], "chunk_id": h["chunk_id"], "text": h["text"], "score": round(score, 3)}
+        for h, score in hits
+    ]
+    return JSONResponse({"results": results})
 
 
 # ────────────────────────────────────────────────────────────────

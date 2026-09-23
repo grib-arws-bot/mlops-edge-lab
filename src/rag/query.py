@@ -24,6 +24,11 @@ _META_PATH = _ROOT / "data" / "processed" / "rag_chunks.jsonl"
 _GGUF_PATH = _ROOT / "experiments" / "toy-sensor-lora" / "model-Q4_K_M.gguf"
 
 _TOP_K = 4
+_FETCH_K_WITH_FILTER = 200
+"""source_filter가 있을 때 FAISS에서 미리 가져올 후보 개수 — MSDS 청크가 전체
+인덱스의 대다수를 차지하게 된 뒤(2026-09-23), "산업안전 원본만" 같은 좁은 필터는
+상위 top_k(4)만 보면 걸릴 게 거의 없다. query_edu.py의 allowed_source_ids 패턴과
+같은 이유로 넉넉히 가져온 다음 걸러서 자른다."""
 _SYSTEM_PROMPT = (
     "당신은 산업안전 가이드라인 문서를 근거로 답변하는 도우미입니다. "
     "아래 [참고 문서]에 있는 내용만 근거로 답하세요. "
@@ -40,10 +45,21 @@ def load_meta() -> list[dict]:
     return [json.loads(line) for line in text.split("\n") if line.strip()]
 
 
-def retrieve(question: str, embed_model: SentenceTransformer, index, meta: list[dict], top_k: int = _TOP_K):
+def retrieve(
+    question: str, embed_model: SentenceTransformer, index, meta: list[dict], top_k: int = _TOP_K,
+    source_filter=None,
+):
+    """source_filter(선택): meta 항목 하나(dict)를 받아 True/False를 돌려주는 함수
+    — 예: `lambda m: m["source"].startswith("msds_")`. 지정하면 top_k보다 훨씬 많이
+    가져온 뒤(_FETCH_K_WITH_FILTER) 걸러서 top_k개로 자른다 — 필터 없이 top_k만
+    가져오면 원하는 소스의 청크가 그 안에 하나도 없을 수 있다."""
     q_vec = embed_model.encode([f"query: {question}"], normalize_embeddings=True)
-    scores, idxs = index.search(np.asarray(q_vec, dtype="float32"), top_k)
-    return [(meta[i], float(s)) for i, s in zip(idxs[0], scores[0]) if i != -1]
+    fetch_k = _FETCH_K_WITH_FILTER if source_filter is not None else top_k
+    scores, idxs = index.search(np.asarray(q_vec, dtype="float32"), min(fetch_k, index.ntotal))
+    hits = [(meta[i], float(s)) for i, s in zip(idxs[0], scores[0]) if i != -1]
+    if source_filter is not None:
+        hits = [h for h in hits if source_filter(h[0])]
+    return hits[:top_k]
 
 
 def answer(question: str, embed_model: SentenceTransformer, index, meta: list[dict], llm: Llama) -> str:
