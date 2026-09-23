@@ -20,13 +20,15 @@
   .msds-detail-table th { text-align: left; width: 190px; vertical-align: top; padding: 8px; background: #12151b; border: 1px solid var(--border); font-weight: 600; font-size: 0.8rem; }
   .msds-detail-table td { padding: 8px; border: 1px solid var(--border); white-space: pre-wrap; line-height: 1.5; font-size: 0.82rem; }
 
-  .msds-results-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-  .msds-results-table th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 0.72rem; text-transform: uppercase; }
-  .msds-results-table td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; white-space: pre-wrap; line-height: 1.5; }
-  .msds-results-table td.score-col { white-space: nowrap; color: var(--muted); }
   .msds-tag, .safety-tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 0.68rem; font-weight: 700; margin-right: 4px; white-space: nowrap; }
   .msds-tag { background: rgba(79,140,255,0.18); color: var(--accent); }
   .safety-tag { background: rgba(63,185,80,0.15); color: var(--normal); }
+  .msds-search-result-item { padding: 8px 10px; border-bottom: 1px dashed var(--border); cursor: pointer; font-size: 0.85rem; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+  .msds-search-result-item:hover { background: rgba(79,140,255,0.08); }
+  .msds-search-result-item:last-child { border-bottom: none; }
+  .msds-search-result-item.active { background: rgba(79,140,255,0.14); }
+  .msds-search-result-item .name { flex: 1; }
+  .msds-search-result-item .score-col { color: var(--muted); font-size: 0.76rem; white-space: nowrap; }
 </style>
 
 <div class="page-header">
@@ -106,7 +108,8 @@
     <button type="button" id="msds-search-btn" style="margin-top:8px;">검색</button>
     <div id="msds-search-status" class="stat" style="margin-top:8px;"></div>
     <div id="msds-answer-area"></div>
-    <div id="msds-search-results" style="margin-top:8px; max-height:440px; overflow-y:auto;"></div>
+    <div id="msds-search-results" style="margin-top:8px; max-height:260px; overflow-y:auto;"></div>
+    <div id="msds-search-detail-area"></div>
   </div>
 </div>
 
@@ -151,16 +154,32 @@ async function loadMsdsDetail(chemId) {
     <table class="msds-detail-table"><tbody>${rows}</tbody></table>`;
 }
 
+let lastSearchResults = [];
+
+function renderMsdsSearchResultDetail(idx) {
+  const r = lastSearchResults[idx];
+  const detailEl = document.getElementById('msds-search-detail-area');
+  document.querySelectorAll('.msds-search-result-item').forEach((el, i) => el.classList.toggle('active', i === idx));
+  detailEl.innerHTML = `
+    <table class="msds-detail-table">
+      <tr><th>출처</th><td>${r.is_msds ? '<span class="msds-tag">MSDS</span>' : '<span class="safety-tag">산업안전</span>'}${escapeHtml(r.display_name)}</td></tr>
+      <tr><th>유사도</th><td>${r.score}</td></tr>
+      <tr><th>근거 내용</th><td>${escapeHtml(r.text)}</td></tr>
+    </table>`;
+}
+
 document.getElementById('msds-search-btn').addEventListener('click', async () => {
   const query = document.getElementById('msds-query-input').value.trim();
   const scope = document.getElementById('msds-scope-select').value;
   const statusEl = document.getElementById('msds-search-status');
   const resultsEl = document.getElementById('msds-search-results');
   const answerEl = document.getElementById('msds-answer-area');
+  const detailEl = document.getElementById('msds-search-detail-area');
   if (!query) { statusEl.textContent = '검색어를 입력하세요.'; return; }
   statusEl.textContent = '↺ 검색 + sLLM 답변 생성 중... (수십 초 소요)';
   answerEl.innerHTML = '';
   resultsEl.innerHTML = '';
+  detailEl.innerHTML = '';
   try {
     const res = await fetch('/api/msds/search', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -168,22 +187,21 @@ document.getElementById('msds-search-btn').addEventListener('click', async () =>
     });
     const data = await res.json();
     if (!res.ok) { statusEl.textContent = data.error || '검색 실패'; return; }
-    statusEl.textContent = `완료 — 근거 ${data.results.length}건`;
+    statusEl.textContent = `완료 — 근거 ${data.results.length}건 (출처를 눌러 내용을 확인하세요)`;
     answerEl.innerHTML = data.answer
       ? `<div class="card" style="margin-top:8px; border-left:3px solid var(--accent);"><strong>sLLM 답변</strong><div class="stat" style="white-space:pre-wrap; margin-top:4px;">${escapeHtml(data.answer)}</div></div>`
       : '<div class="stat" style="margin-top:8px;">근거를 찾지 못해 답변을 생성하지 않았습니다.</div>';
+    lastSearchResults = data.results;
     if (data.results.length) {
-      const rows = data.results.map(r => `
-        <tr>
-          <td>${r.is_msds ? '<span class="msds-tag">MSDS</span>' : '<span class="safety-tag">산업안전</span>'}${escapeHtml(r.display_name)}</td>
-          <td class="score-col">${r.score}</td>
-          <td>${escapeHtml(r.text)}</td>
-        </tr>`).join('');
-      resultsEl.innerHTML = `
-        <table class="msds-results-table">
-          <thead><tr><th>출처</th><th>유사도</th><th>근거 내용</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>`;
+      resultsEl.innerHTML = data.results.map((r, i) => `
+        <div class="msds-search-result-item" data-idx="${i}">
+          <span class="name">${r.is_msds ? '<span class="msds-tag">MSDS</span>' : '<span class="safety-tag">산업안전</span>'}${escapeHtml(r.display_name)}</span>
+          <span class="score-col">score=${r.score}</span>
+        </div>`).join('');
+      resultsEl.querySelectorAll('.msds-search-result-item').forEach(el => {
+        el.addEventListener('click', () => renderMsdsSearchResultDetail(parseInt(el.dataset.idx, 10)));
+      });
+      renderMsdsSearchResultDetail(0);
     } else {
       resultsEl.innerHTML = '<div class="stat">결과가 없습니다.</div>';
     }
