@@ -15,12 +15,16 @@ from rag import drift_check
 
 
 def test_status_boundaries():
+    # 임계치는 125번(의사결정_로그)에서 업계 관례값(0.1/0.25)이 이 지표(RAG top-1
+    # 유사도)엔 안 맞아서(같은 분포끼리 비교해도 PSI가 최대 1.69까지 나옴, 실측)
+    # 2.0/8.0으로 재보정됐다 — drift_check.PSI_STABLE_MAX/PSI_MODERATE_MAX를 직접
+    # 참조해서, 상수가 다시 바뀌어도 이 테스트가 따라가게 한다.
     assert drift_check.status_from_psi(0.0) == "stable"
-    assert drift_check.status_from_psi(0.09) == "stable"
-    assert drift_check.status_from_psi(0.1) == "moderate"  # 경계값은 "안정"이 아니라 "중간"
-    assert drift_check.status_from_psi(0.24) == "moderate"
-    assert drift_check.status_from_psi(0.25) == "drift"  # 경계값은 "중간"이 아니라 "드리프트"
-    assert drift_check.status_from_psi(1.0) == "drift"
+    assert drift_check.status_from_psi(drift_check.PSI_STABLE_MAX - 0.01) == "stable"
+    assert drift_check.status_from_psi(drift_check.PSI_STABLE_MAX) == "moderate"  # 경계값은 "안정"이 아니라 "중간"
+    assert drift_check.status_from_psi(drift_check.PSI_MODERATE_MAX - 0.01) == "moderate"
+    assert drift_check.status_from_psi(drift_check.PSI_MODERATE_MAX) == "drift"  # 경계값은 "중간"이 아니라 "드리프트"
+    assert drift_check.status_from_psi(100.0) == "drift"
 
 
 def test_check_drift_no_reference(tmp_path):
