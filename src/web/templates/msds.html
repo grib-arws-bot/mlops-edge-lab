@@ -42,75 +42,77 @@
 
 <div class="card">
   <strong>데이터 출처 (3종)</strong>
-  <div class="why">"산업안전"·"MSDS"·"AI Hub 물성치"는 서로 다른 원본입니다 — 완전히 별개로 수집·관리됩니다.</div>
+  <div class="why">"산업안전"·"MSDS"·"AI Hub 물성치"는 서로 다른 원본입니다 — 완전히 별개로 수집·관리되고, 갱신 가능 여부도 서로 다릅니다.</div>
   <table class="msds-source-table">
-    <thead><tr><th>도메인</th><th>출처</th><th>데이터양</th></tr></thead>
+    <thead><tr><th>도메인</th><th>출처</th><th>데이터양</th><th>최신화</th></tr></thead>
     <tbody>
       <tr>
         <td><span class="safety-tag">산업안전</span></td>
         <td>{{ source_summary.safety.origin }}</td>
         <td class="count">{{ source_summary.safety.doc_count }}건 문서 · {{ source_summary.safety.chunk_count }}개 청크</td>
+        <td><span class="stat" style="font-size:0.78rem;">수동 수집·관리 — 외부 버전 신호가 없어 자동 갱신 불가</span></td>
       </tr>
       <tr>
         <td><span class="msds-tag">MSDS</span></td>
         <td>{{ source_summary.msds.origin }}</td>
         <td class="count">{{ source_summary.msds.doc_count }}건 물질 · {{ source_summary.msds.chunk_count }}개 청크</td>
+        <td>
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+              <button type="button" id="msds-check-updates-btn" style="margin-top:0; padding:2px 8px; font-size:0.78rem;" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>최신본 확인</button>
+              <button type="button" id="msds-trigger-update-btn" style="margin-top:0; padding:2px 8px; font-size:0.78rem; {% if not (sync_status and sync_status.up_to_date == false) %}display:none;{% endif %}" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>지금 업데이트</button>
+            </div>
+            <span id="msds-sync-result">
+              {% if sync_status %}
+                {% if sync_status.error %}
+                <span class="stat" style="display:inline; font-size:0.76rem;">최신본 확인 실패</span>
+                {% elif sync_status.up_to_date == true %}
+                <span class="stat" style="display:inline; font-size:0.76rem; color:var(--normal);">✓ 최신 ({{ sync_status.checked_at.split('T')[0] }})</span>
+                {% elif sync_status.up_to_date == false %}
+                <span class="stat" style="display:inline; font-size:0.76rem; color:var(--caution);">새 버전 있음</span>
+                {% else %}
+                <span class="stat" style="display:inline; font-size:0.76rem;">아직 확인 안 됨</span>
+                {% endif %}
+              {% else %}
+              <span class="stat" style="display:inline; font-size:0.76rem;">아직 확인 안 됨</span>
+              {% endif %}
+            </span>
+            <div id="msds-update-status" class="stat" style="font-size:0.76rem;"></div>
+          </div>
+        </td>
       </tr>
       <tr>
         <td><span class="msds-tag" style="background: rgba(255,159,10,0.18); color:#ff9f0a;">AI Hub</span></td>
         <td>{{ source_summary.aihub.origin }}</td>
         <td class="count">{{ source_summary.aihub.doc_count }}건 화합물</td>
+        <td>
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+              <button type="button" id="aihub-check-updates-btn" style="margin-top:0; padding:2px 8px; font-size:0.78rem;" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>최신본 확인</button>
+              <button type="button" id="aihub-trigger-update-btn" style="margin-top:0; padding:2px 8px; font-size:0.78rem; {% if not (aihub_sync_status and aihub_sync_status.up_to_date != true) %}display:none;{% endif %}" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>지금 업데이트</button>
+            </div>
+            <span id="aihub-sync-result">
+              {% if aihub_sync_status %}
+                {% if aihub_sync_status.error %}
+                <span class="stat" style="display:inline; font-size:0.76rem;">최신본 확인 실패</span>
+                {% elif aihub_sync_status.up_to_date == true %}
+                <span class="stat" style="display:inline; font-size:0.76rem; color:var(--normal);">✓ 최신 ({{ aihub_sync_status.checked_at.split('T')[0] }})</span>
+                {% elif aihub_sync_status.up_to_date == false %}
+                <span class="stat" style="display:inline; font-size:0.76rem; color:var(--caution);">용량 시그니처 변경</span>
+                {% else %}
+                <span class="stat" style="display:inline; font-size:0.76rem;">비교 기준 없음(최초)</span>
+                {% endif %}
+              {% else %}
+              <span class="stat" style="display:inline; font-size:0.76rem;">아직 확인 안 됨</span>
+              {% endif %}
+            </span>
+            <div id="aihub-update-status" class="stat" style="font-size:0.76rem;"></div>
+            <span class="stat" style="font-size:0.7rem; opacity:0.75;">버전 해시 없음 — 용량(MB) 시그니처로 근사 판단</span>
+          </div>
+        </td>
       </tr>
     </tbody>
   </table>
-
-  <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--border);">
-    <div class="stat" style="font-weight:600; margin-bottom:6px;">MSDS 최신화</div>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <button type="button" id="msds-check-updates-btn" style="margin-top:0;" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>최신본 확인</button>
-      <span id="msds-sync-result">
-        {% if sync_status %}
-          {% if sync_status.error %}
-          <span class="stat" style="display:inline;">최신본 확인 실패</span>
-          {% elif sync_status.up_to_date == true %}
-          <span class="stat" style="display:inline; color:var(--normal);">✓ 최신 상태입니다 ({{ sync_status.checked_at.split('T')[0] }} 확인)</span>
-          {% elif sync_status.up_to_date == false %}
-          <span class="stat" style="display:inline; color:var(--caution);">새 버전이 있습니다</span>
-          {% else %}
-          <span class="stat" style="display:inline;">아직 확인 안 됨</span>
-          {% endif %}
-        {% else %}
-        <span class="stat" style="display:inline;">아직 확인 안 됨 — "최신본 확인"을 눌러보세요</span>
-        {% endif %}
-      </span>
-      <button type="button" id="msds-trigger-update-btn" style="margin-top:0; {% if not (sync_status and sync_status.up_to_date == false) %}display:none;{% endif %}" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>지금 업데이트</button>
-    </div>
-    <div id="msds-update-status" class="stat" style="margin-top:6px;"></div>
-  </div>
-
-  <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--border);">
-    <div class="stat" style="font-weight:600; margin-bottom:6px;">AI Hub 최신화 <span style="font-weight:400;">— 버전 해시가 없어 파일 용량(MB 반올림) 시그니처 비교로 근사 판단</span></div>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <button type="button" id="aihub-check-updates-btn" style="margin-top:0;" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>최신본 확인</button>
-      <span id="aihub-sync-result">
-        {% if aihub_sync_status %}
-          {% if aihub_sync_status.error %}
-          <span class="stat" style="display:inline;">최신본 확인 실패</span>
-          {% elif aihub_sync_status.up_to_date == true %}
-          <span class="stat" style="display:inline; color:var(--normal);">✓ 최신 상태입니다 ({{ aihub_sync_status.checked_at.split('T')[0] }} 확인)</span>
-          {% elif aihub_sync_status.up_to_date == false %}
-          <span class="stat" style="display:inline; color:var(--caution);">용량 시그니처가 달라졌습니다</span>
-          {% else %}
-          <span class="stat" style="display:inline;">아직 비교 기준 없음(최초 상태)</span>
-          {% endif %}
-        {% else %}
-        <span class="stat" style="display:inline;">아직 확인 안 됨 — "최신본 확인"을 눌러보세요</span>
-        {% endif %}
-      </span>
-      <button type="button" id="aihub-trigger-update-btn" style="margin-top:0; {% if not (aihub_sync_status and aihub_sync_status.up_to_date != true) %}display:none;{% endif %}" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>지금 업데이트</button>
-    </div>
-    <div id="aihub-update-status" class="stat" style="margin-top:6px;"></div>
-  </div>
 </div>
 
 {% if not index_available %}
