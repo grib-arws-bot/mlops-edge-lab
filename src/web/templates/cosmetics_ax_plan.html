@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}화장품 AX 기획 | MLOps-Edge-Lab{% endblock %}
+{% block content %}
+<style>
+  .plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .plan-grid { grid-template-columns: 1fr; } }
+  .plan-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }
+  .plan-table th, .plan-table td { padding: 7px 8px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .plan-table th { color: var(--muted); font-weight: 600; font-size: 0.74rem; text-transform: uppercase; width: 110px; }
+  .isolated-col { border: 1px dashed var(--border); border-radius: 10px; padding: 14px; }
+  .isolated-col .stage-box { background: #12151b; }
+  .no-link-note { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 10px 0; }
+  .shared-box { background: var(--panel); border: 1px solid var(--accent); border-radius: 10px; padding: 16px 18px; margin-bottom: 4px; }
+  .shared-box strong { color: var(--accent); }
+</style>
+
+<div class="page-header">
+  <div>
+    <h1>화장품 AX 기획</h1>
+    <h2 style="margin-bottom:0;">그립이 진행 중인 화장품 제조 AX 실증 2건(강원·충북)을 같은 개발팀이 동시에 진행할 때의 시스템 구성 예시 — <strong>개념 정리용, 실제 개발 착수 전 기획 단계</strong>입니다.</h2>
+  </div>
+</div>
+
+<div class="card">
+  <strong>1. 두 과제 개요</strong>
+  <div class="why">둘 다 배치형 화장품 제조공정에 AI를 적용하는 과제지만, 기술 난이도와 규모가 다릅니다.</div>
+  <div class="plan-grid" style="margin-top:10px;">
+    <div class="card" style="margin:0;">
+      <strong>① 강원정보문화산업진흥원 과제</strong>
+      <table class="plan-table">
+        <tr><th>대상 공정</th><td>천연물 추출 · 미생물 발효 · 초고압 나노분산 (3대 핵심공정)</td></tr>
+        <tr><th>기간</th><td>2026.09 ~ 2027.12 (2개년, 16개월)</td></tr>
+        <tr><th>총사업비</th><td>3억 6,350만원</td></tr>
+        <tr><th>AI 기술</th><td>XGBoost·GRU/LSTM·물리모델+RF·IsolationForest + <b>sLLM AI Agent</b> + MLOps(드리프트 감지·Model Registry)</td></tr>
+        <tr><th>KPI</th><td>생산량 15%↑, 불량 8%→2%(75%↓)</td></tr>
+      </table>
+    </div>
+    <div class="card" style="margin:0;">
+      <strong>② 세화피앤씨 과제(충북테크노파크 운영)</strong>
+      <table class="plan-table">
+        <tr><th>대상 공정</th><td>유상용해·수상용해·혼합 등 배치 공정</td></tr>
+        <tr><th>기간</th><td>협약일 ~ 2027.08.30 (12개월)</td></tr>
+        <tr><th>총사업비</th><td>9,080만원</td></tr>
+        <tr><th>AI 기술</th><td>XGBoost(품질예측·불량판정)·SHAP(원인분석)·IsolationForest→LSTM-AE(설비이상감지) — 정형 ML 전용, LLM 없음</td></tr>
+        <tr><th>KPI</th><td>불량판정 Recall≥90%, 품질예측 MAPE≤5%, TTA 공인검증</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <strong>2. 공통점 · 차이점</strong>
+  <div class="plan-grid" style="margin-top:10px;">
+    <div>
+      <div class="stat" style="font-weight:600; margin-bottom:6px;">공통점</div>
+      <ul style="margin:0; padding-left:18px; font-size:0.85rem; line-height:1.7;">
+        <li>배치형 화장품 제조공정의 실측 시계열 데이터(온도·RPM·압력·전류 등)를 다룸</li>
+        <li>Lot/Batch ID를 단일 식별자로 삼는 데이터 거버넌스가 최우선 과제</li>
+        <li>PLC/IoT Gateway 기반 센서 수집(RS-485·4-20mA) — 물리 계층 패턴이 사실상 동일</li>
+        <li>4계층 아키텍처(수집→저장·처리→AI분석→서비스)로 설계</li>
+        <li>Human-in-the-loop — AI 추천값은 사람 승인 후에만 현장 반영</li>
+      </ul>
+    </div>
+    <div>
+      <div class="stat" style="font-weight:600; margin-bottom:6px;">차이점</div>
+      <ul style="margin:0; padding-left:18px; font-size:0.85rem; line-height:1.7;">
+        <li>강원 쪽이 기술 난이도·규모 모두 훨씬 큼(딥러닝·sLLM Agent·MLOps 드리프트 감지 포함)</li>
+        <li>인프라 요구: 강원=GPU 서버 필요, 세화=CPU 정형모델로 충분</li>
+        <li>검증 방식: 강원=3자 협의 검증, 세화=TTA(외부 공인기관) 인증 필요</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <strong>3. 핵심 발견 — 실제로 "하나의 팀"이 맞음</strong>
+  <div class="why">두 과제의 실제 투입 인력 구성을 비교해보니, 핵심 인력 상당수가 두 과제에 걸쳐 중복 투입되도록 계획돼 있습니다 — 같은 사람이 과제마다 다른 역할(예: 한쪽은 총괄 PM, 다른 쪽은 실무 개발자)로 참여합니다. 일정도 "비슷한 시기에 겹치는" 정도가 아니라, 세화 과제 기간(12개월) 전체가 강원 과제 기간(16개월) 안에 통째로 포함되는 관계입니다.</div>
+  <div class="stat" style="margin-top:8px;">→ 그래서 이 두 과제는 순차적으로 다룰 수 없고, 처음부터 "동시 진행"을 전제로 시스템과 인력 운영을 설계해야 합니다.</div>
+</div>
+
+<div class="card">
+  <strong>4. 시스템 구성 예시</strong>
+  <div class="why">이 프로젝트(MLOps-Edge-Lab)가 이미 지키는 원칙과 같습니다 — "팀·설계 패턴은 공유하되, 데이터·배포 환경은 완전히 분리한다." 두 수요기업 모두 보안서약서·자료 반출입 절차를 요구하므로, 이건 선택이 아니라 계약상 의무이기도 합니다.</div>
+
+  <div class="shared-box" style="margin-top:12px;">
+    <strong>그립 공통 자산</strong> — 공통 인력 풀 · 재사용 가능한 설계 패턴(코드 골격일 뿐, 실행 인스턴스 아님) · 사내 개발/스테이징 서버(고객 데이터 없이 코드만 개발)
+  </div>
+  <div class="stat" style="text-align:center; padding:6px 0;">↓ 패턴만 적용, 데이터는 안 섞임 ↓</div>
+
+  <div class="plan-grid">
+    <div class="isolated-col">
+      <div class="stat" style="font-weight:600; margin-bottom:8px; text-align:center;">배포 A — 강원 과제 (완전 격리)</div>
+      <div class="flow" style="flex-direction:column; gap:8px;">
+        <div class="stage-box"><small>센서·PLC·IoT Gateway (추출기·발효기·고압균질기)</small></div>
+        <div class="stage-box"><small>Lot/Batch RDB (전용)</small></div>
+        <div class="stage-box"><small>MLOps 코어 — Model Registry·드리프트 감지·Rollback</small></div>
+        <div class="stage-box"><small>AI 모델 4종 + AI Agent(sLLM, GPU)</small></div>
+        <div class="stage-box"><small>대시보드·모바일 UI (승인 워크플로)</small></div>
+      </div>
+    </div>
+    <div class="isolated-col">
+      <div class="stat" style="font-weight:600; margin-bottom:8px; text-align:center;">배포 B — 세화 과제 (완전 격리)</div>
+      <div class="flow" style="flex-direction:column; gap:8px;">
+        <div class="stage-box"><small>센서·RS-485 제어판넬·IoT Gateway (유상·수상·혼합 믹서)</small></div>
+        <div class="stage-box"><small>Batch InfluxDB + PostgreSQL (전용)</small></div>
+        <div class="stage-box"><small>AI 모델 4종 (XGBoost·SHAP·IsolationForest→LSTM-AE, CPU)</small></div>
+        <div class="stage-box"><small>대시보드 UI (TTA 검증 대응 리포트)</small></div>
+      </div>
+    </div>
+  </div>
+  <div class="no-link-note">✕ 네트워크·DB·모델 저장소 물리적으로 완전 분리 — 두 배포 사이에 연결 경로 자체를 만들지 않음</div>
+</div>
+
+<div class="card">
+  <strong>5. 다음에 확인할 것</strong>
+  <ul style="margin:8px 0 0; padding-left:18px; font-size:0.85rem; line-height:1.7;">
+    <li>두 과제 모두 "총괄 PM" 역할과 책임 소재를 착수 전에 명확히 확정</li>
+    <li>두 배포 환경을 물리적으로 어디에 둘지(그립 자체 서버 vs 고객사 현장 On-premise vs 클라우드) 미확정 — 착수 후 확인 필요</li>
+    <li>강원 과제의 MLOps 방법론(드리프트 재보정 등)을 세화 과제에도 적용할지는 미정 — 세화는 정형 ML이라 필수는 아니지만 같은 팀이라 학습 비용 대비 적용 여지는 있음</li>
+    <li>중복 투입되는 핵심 인력의 시기별 부하가 몰리지 않는지는 별도 내부 자료(실명 포함)로 관리 — 이 페이지에는 개념만 남김</li>
+  </ul>
+</div>
+{% endblock %}

@@ -681,6 +681,15 @@ def quality(request: Request):
     return templates.TemplateResponse(request, "quality.html", _quality_eval_summary())
 
 
+@app.get("/cosmetics-ax-plan", response_class=HTMLResponse)
+def cosmetics_ax_plan(request: Request):
+    """화장품 AX 과제 2건(강원·세화) 심층 분석 + 시스템 구성 예시 — 순수 정적 페이지.
+    실제 개발 착수 전 개념 정리용이라 동적 컨텍스트가 없다(2026-09-28). 실명·상세 예산
+    분해는 이 페이지에 올리지 않는다 — git 커밋 시 실명이 포함된 문서 push가 안전장치에
+    막힌 적이 있어서(데이터 유출 우려), 사용자 요청대로 개념 수준으로만 정리했다."""
+    return templates.TemplateResponse(request, "cosmetics_ax_plan.html", {})
+
+
 @app.get("/api/rag-drift/check")
 def rag_drift_check():
     """/control-room 페이지가 로드 시 이미 이 값을 받지만, 새로고침 없이 "다시 확인"
