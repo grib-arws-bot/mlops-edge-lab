@@ -114,52 +114,53 @@
 <div class="card">
   <strong>5. 파이프라인 구조 — 모델별 파인튜닝·RAG 매핑</strong>
   <div class="why">강원은 4축 예측모델 + sLLM Agent로 총 5개, 충북은 정형 ML 4개(그중 SHAP은 별도 학습 없는 사후설명 기법)입니다. 파인튜닝·RAG·Agent(도구호출)는 강원의 sLLM 한 곳에만 해당됩니다.</div>
-  <div class="mermaid" style="margin-top:12px; background:#12151b; border:1px solid var(--border); border-radius:10px; padding:12px;">
-flowchart TB
-    subgraph GW["강원 과제 — 5개 모델 (4축 예측모델 + sLLM Agent)"]
-        direction TB
-        GWDATA["데이터 수집&lt;br/&gt;추출·발효·나노분산 센서 + 예지보전용 진동/전류"]
-
-        subgraph GWMODELS["4축 AI 모델 — 전통 ML/DL, 파인튜닝·RAG 해당없음"]
-            GW1["M1 추출최적화&lt;br/&gt;XGBoost + Bayesian Optimization"]
-            GW2["M2 발효품질예측&lt;br/&gt;GRU/TCN → LSTM"]
-            GW3["M3 나노분산추천&lt;br/&gt;물리모델 + RF/GBM"]
-            GW4["M4 설비예지보전&lt;br/&gt;FFT/웨이블릿 → IsolationForest → RF"]
-        end
-
-        GWRAG[("RAG 인덱스&lt;br/&gt;SOP·원료특성·작업매뉴얼·COA양식")]
-        GWFT[("파인튜닝(LoRA)&lt;br/&gt;현장 대화체 · COA 생성체")]
-
-        GW5["M5 AI Agent (sLLM)&lt;br/&gt;자연어질의 → 도구호출 → 결과기반 답변&lt;br/&gt;(할루시네이션 방지: 근거 없으면 모른다고 답함)"]
-
-        GWDATA --> GWMODELS
-        GWMODELS -- "도구(AI추론 API)로 호출" --> GW5
-        GWRAG -- "검색 근거" --> GW5
-        GWFT -. "말투·업무능력 학습" .-> GW5
-        GW5 --> GWUI["대화형 UI + 대시보드&lt;br/&gt;(Human-in-the-loop 승인)"]
+  <div class="stat" style="margin-top:8px; font-weight:600;">강원 — M1·M2·M3는 "순차"가 아니라 "각자 다른 장비에 붙는 병렬" 모델입니다. M4(예지보전)만 3개 설비 전체에 공통 적용됩니다(제안서 원문 "3대설비공통"). 가로 = 파이프라인 단계, 세로 = 장비·모델. 맨 끝에서 4개 모델 출력이 전부 AI Agent로 모입니다.</div>
+  <div class="mermaid" style="margin-top:8px; background:#12151b; border:1px solid var(--border); border-radius:10px; padding:12px;">
+flowchart LR
+    subgraph ROW1["천연물 추출기 — M1 (단독)"]
+        direction LR
+        R1E["추출기"] --> R1S["센서&lt;br/&gt;온도·RPM·투입량·수분함량"] --> R1P["전처리"] --> R1T["M1 학습&lt;br/&gt;XGBoost+Bayesian Opt"] --> R1R["Registry"] --> R1O["서빙&lt;br/&gt;추출조건 추천"]
+    end
+    subgraph ROW2["미생물 발효기 — M2 (단독)"]
+        direction LR
+        R2E["발효기"] --> R2S["센서&lt;br/&gt;pH·DO·온도·RPM"] --> R2P["전처리"] --> R2T["M2 학습&lt;br/&gt;GRU/TCN→LSTM"] --> R2R["Registry"] --> R2O["서빙&lt;br/&gt;종료시점·품질예측"]
+    end
+    subgraph ROW3["고압균질기 — M3 (단독)"]
+        direction LR
+        R3E["고압균질기"] --> R3S["센서&lt;br/&gt;압력·Pass횟수·D50/PDI"] --> R3P["전처리"] --> R3T["M3 학습&lt;br/&gt;물리모델+RF"] --> R3R["Registry"] --> R3O["서빙&lt;br/&gt;파라미터 추천"]
+    end
+    subgraph ROW4["설비 3개 전체 공통 — M4 (cross-cutting)"]
+        direction LR
+        R4E["추출기+발효기+고압균질기&lt;br/&gt;(설비 3개 전체)"] --> R4S["센서&lt;br/&gt;모터전류·진동(공통)"] --> R4P["전처리&lt;br/&gt;FFT/웨이블릿"] --> R4T["M4 학습&lt;br/&gt;IsolationForest→RF"] --> R4R["Registry"] --> R4O["서빙&lt;br/&gt;이상탐지 알람"]
     end
 
-    subgraph CB["충북 과제 — 4개 모델 (Agent/RAG 없음)"]
-        direction TB
-        CBDATA["데이터 수집&lt;br/&gt;유상·수상·혼합 믹서 센서 + 3년치 QC 이력"]
+    R1O & R2O & R3O & R4O --> AGENT["M5 AI Agent (sLLM)&lt;br/&gt;4개 모델을 도구로 호출"]
+    RAG[("RAG&lt;br/&gt;SOP·원료특성·매뉴얼")] -. 검색근거 .-> AGENT
+    FT[("파인튜닝(LoRA)&lt;br/&gt;대화체·COA생성")] -. 말투학습 .-> AGENT
+    AGENT --> UI["대화형UI+대시보드&lt;br/&gt;Human-in-the-loop 승인"]
+  </div>
 
-        CB1["M1 품질예측&lt;br/&gt;XGBoost Regressor"]
-        CB2["M2 불량판정&lt;br/&gt;XGBoost Classifier"]
-        CB3["M3 불량원인분석&lt;br/&gt;SHAP (M1·M2의 사후설명 — 별도 학습 없음)"]
-        CB4["M4 설비이상감지&lt;br/&gt;Isolation Forest → LSTM-AE"]
-
-        CBDATA --> CB1 & CB2 & CB4
-        CB1 & CB2 -.설명대상.-> CB3
-        CB1 & CB2 & CB3 & CB4 --> CBUI["대시보드&lt;br/&gt;(수치·알람 직접 표시)"]
+  <div class="stat" style="margin-top:16px; font-weight:600;">충북 — M1·M2도 같은 설비 데이터를 쓰지만 서로 다른 목적(수치예측 vs 합격판정)으로 별도 학습됩니다. M3(SHAP)는 새 데이터가 아니라 M1·M2가 학습을 마친 뒤 그 모델 자체를 설명하는 사후 기법이라 별도 행이 아니라 M1·M2에서 갈라져 나오는 것으로 그렸습니다. Agent가 없어 대시보드로 바로 모입니다.</div>
+  <div class="mermaid" style="margin-top:8px; background:#12151b; border:1px solid var(--border); border-radius:10px; padding:12px;">
+flowchart LR
+    subgraph ROWB1["믹서 설비 — M1 (단독)"]
+        direction LR
+        B1E["유상·수상·혼합 믹서"] --> B1S["센서&lt;br/&gt;온도·RPM·전류"] --> B1P["전처리"] --> B1T["M1 학습&lt;br/&gt;XGBoost Regressor"] --> B1R["Registry"] --> B1O["서빙&lt;br/&gt;품질수치 예측"]
+    end
+    subgraph ROWB2["같은 믹서 + QC이력 — M2 (단독)"]
+        direction LR
+        B2E["믹서 + 3년치 QC(2,231건)"] --> B2S["센서+QC 라벨"] --> B2P["전처리"] --> B2T["M2 학습&lt;br/&gt;XGBoost Classifier"] --> B2R["Registry"] --> B2O["서빙&lt;br/&gt;합격/불합격 판정"]
+    end
+    subgraph ROWB4["믹서 설비 공통 — M4 (cross-cutting)"]
+        direction LR
+        B4E["믹서 설비(모터전류·진동)"] --> B4S["센서&lt;br/&gt;전류·진동"] --> B4P["전처리"] --> B4T["M4 학습&lt;br/&gt;IsolationForest→LSTM-AE"] --> B4R["Registry"] --> B4O["서빙&lt;br/&gt;이상탐지 알람"]
     end
 
-    subgraph SHARED["그립 공통 MLOps 백본 — 두 과제 모델 전부 통과"]
-        REG["Model Registry"] --> DRIFT["Drift 감지&lt;br/&gt;Evidently PSI/KS"] --> ROLL["Rollback&lt;br/&gt;(사람 승인)"]
-    end
+    B1T -. 학습된 모델 .-> B3["M3 SHAP&lt;br/&gt;사후설명, 별도학습 없음"]
+    B2T -. 학습된 모델 .-> B3
+    B3 --> B3O["서빙&lt;br/&gt;불량원인 리포트"]
 
-    GWMODELS -.등록·모니터링.-> SHARED
-    GW5 -.등록·모니터링.-> SHARED
-    CB1 & CB2 & CB4 -.등록·모니터링.-> SHARED
+    B1O & B2O & B3O & B4O --> DASH["대시보드&lt;br/&gt;Agent/RAG 없음, 수치·알람 직접 표시"]
   </div>
 
   <table class="plan-table" style="margin-top:16px;">
