@@ -45,6 +45,7 @@ from agent.cosmetics_run import run_cosmetics_agent
 from agent.cosmetics_tools import CosmeticsToolContext
 from agent.run import judge_and_actuate, narrate, preview, run_agent, run_agent_composite, to_dict, to_dict_composite
 from agent.tools import ToolContext
+from collect import aihub_chem_ingest
 from collect import msds_hf_ingest
 from collect import registry as collect_registry
 from collect.storage import collection_summary
@@ -90,6 +91,9 @@ _MSDS_SYNC_STATUS_PATH = _ROOT / "data" / "processed" / "msds_sync_status.json"
 _MSDS_TEXT_DIR = _ROOT / "data" / "processed" / "text"
 _MSDS_UPDATE_JOB_STATUS_PATH = _ROOT / "data" / "processed" / "msds_update_job.json"
 _MSDS_PYTHON_BIN = _ROOT / ".venv" / "bin" / "python"
+_AIHUB_PROPERTIES_PATH = _ROOT / "data" / "processed" / "aihub_chem_properties.json"
+_AIHUB_SYNC_STATUS_PATH = _ROOT / "data" / "processed" / "aihub_chem_sync_status.json"
+_AIHUB_UPDATE_JOB_STATUS_PATH = _ROOT / "data" / "processed" / "aihub_chem_update_job.json"
 
 _state: dict = {}
 
@@ -299,6 +303,17 @@ def _load_msds_catalog() -> None:
         _state["msds_catalog"] = []
 
 
+def _load_aihub_properties() -> None:
+    """AI Hub 화학물질 위험성 예측 데이터(2026-09-28, scripts/build_aihub_catalog.py로
+    빌드) — CAS 번호로 병합된 13,353개 화합물의 계산된 물성치 + 실측 증기압/연소열/
+    인화점. 기존 msds_catalog(KOSHA MSDS 16개 항목, 텍스트 위주)와는 완전히 다른
+    출처·성격이라 별도 상태 키로 둔다 — 조회 시 CAS 번호로만 연결한다."""
+    if _AIHUB_PROPERTIES_PATH.exists():
+        _state["aihub_properties"] = json.loads(_AIHUB_PROPERTIES_PATH.read_text(encoding="utf-8"))
+    else:
+        _state["aihub_properties"] = []
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _cleanup_orphaned_edge_scopes()
@@ -314,6 +329,7 @@ async def lifespan(_app: FastAPI):
     _load_edu_rag_or_disable()
     _load_safety_rag_or_disable()
     _load_msds_catalog()
+    _load_aihub_properties()
     _ensure_deck_pdf()
     _init_control_room()
     control_room_task = asyncio.create_task(_control_room_loop())
@@ -768,11 +784,20 @@ def msds_page(request: Request):
             sync_status = json.loads(_MSDS_SYNC_STATUS_PATH.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             sync_status = None
+    aihub_sync_status = None
+    if _AIHUB_SYNC_STATUS_PATH.exists():
+        try:
+            aihub_sync_status = json.loads(_AIHUB_SYNC_STATUS_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            aihub_sync_status = None
     return templates.TemplateResponse(request, "msds.html", {
         "catalog_count": len(_state.get("msds_catalog") or []),
+        "aihub_count": len(_state.get("aihub_properties") or []),
         "index_available": _state.get("safety_index") is not None,
         "sync_status": sync_status,
         "update_job_status": _msds_update_job_status(),
+        "aihub_sync_status": aihub_sync_status,
+        "aihub_update_job_status": _aihub_update_job_status(),
         "source_summary": _msds_source_summary(),
     })
 
@@ -817,6 +842,57 @@ def msds_detail(chem_id: str):
         return JSONResponse({"error": "원문 파일이 없습니다"}, status_code=404)
     text = path.read_text(encoding="utf-8")
     return JSONResponse({"entry": entry, "sections": _parse_msds_sections(text)})
+
+
+_AIHUB_PROPERTY_LABELS = {
+    "vapor_pressure": "증기압(vapor pressure)",
+    "heat_combustion": "연소열(heat of combustion)",
+    "flash_point": "인화점(flash point)",
+}
+
+
+def _aihub_display_name(rec: dict, msds_by_cas: dict) -> str:
+    """AI Hub 데이터에는 한글 물질명이 없다(iupac_name만 영문) — 기존 MSDS
+    카탈로그(48,966건)와 CAS로 겹치면 한글명을 빌려온다. 없으면 iupac_name으로
+    표시한다(둘 다 없는 경우는 없음 — CAS 자체가 필수 키로 걸러져 있음)."""
+    msds_entry = msds_by_cas.get(rec["cas_number"])
+    return msds_entry["name_ko"] if msds_entry else (rec.get("iupac_name") or rec["cas_number"])
+
+
+@app.get("/api/msds/property-autocomplete")
+def msds_property_autocomplete(q: str = ""):
+    q = q.strip()
+    if len(q) < 1:
+        return JSONResponse({"results": []})
+    catalog = _state.get("aihub_properties") or []
+    msds_by_cas = {c["cas_no"]: c for c in (_state.get("msds_catalog") or []) if c.get("cas_no")}
+    q_lower = q.lower()
+    matches = []
+    for rec in catalog:
+        if q in rec["cas_number"] or q_lower in (rec.get("iupac_name") or "").lower() \
+                or q_lower in _aihub_display_name(rec, msds_by_cas).lower():
+            matches.append({
+                "cas_number": rec["cas_number"],
+                "display_name": _aihub_display_name(rec, msds_by_cas),
+                "molecular_formula": rec.get("molecular_formula"),
+                "has_properties": sorted(rec["properties"].keys()),
+            })
+        if len(matches) >= 20:
+            break
+    return JSONResponse({"results": matches})
+
+
+@app.get("/api/msds/property-detail/{cas_number}")
+def msds_property_detail(cas_number: str):
+    catalog = _state.get("aihub_properties") or []
+    rec = next((r for r in catalog if r["cas_number"] == cas_number), None)
+    if rec is None:
+        return JSONResponse({"error": "해당 CAS 번호의 물성치 데이터가 없습니다"}, status_code=404)
+    msds_by_cas = {c["cas_no"]: c for c in (_state.get("msds_catalog") or []) if c.get("cas_no")}
+    result = dict(rec)
+    result["display_name"] = _aihub_display_name(rec, msds_by_cas)
+    result["msds_chem_id"] = (msds_by_cas.get(cas_number) or {}).get("chem_id")
+    return JSONResponse(result)
 
 
 def _msds_update_job_status() -> dict:
@@ -871,6 +947,58 @@ async def msds_trigger_update():
         start_new_session=True,
     )
     return JSONResponse({"status": "started", "target_revision": check.get("latest_revision")})
+
+
+def _aihub_update_job_status() -> dict:
+    if not _AIHUB_UPDATE_JOB_STATUS_PATH.exists():
+        return {"status": "idle"}
+    try:
+        return json.loads(_AIHUB_UPDATE_JOB_STATUS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"status": "idle"}
+
+
+@app.post("/api/msds/aihub-check-updates")
+async def msds_aihub_check_updates():
+    """AI Hub 버전 "MSDS와 동일한 업데이트 로직" 요청(2026-09-28)에 따라 msds
+    check-updates와 같은 패턴 — aihub_chem_ingest.check_for_updates()가 용량
+    시그니처를 조회하는 가벼운 호출이라 동기로 바로 실행한다."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, aihub_chem_ingest.check_for_updates)
+    return JSONResponse(result)
+
+
+@app.get("/api/msds/aihub-update-status")
+def msds_aihub_update_status():
+    return JSONResponse(_aihub_update_job_status())
+
+
+@app.post("/api/msds/aihub-trigger-update")
+async def msds_aihub_trigger_update():
+    """"지금 업데이트"(AI Hub) — msds_trigger_update와 동일한 이유로 재다운로드+
+    재추출+카탈로그 재빌드를 systemd-run --scope로 분리한다. up_to_date가 None(용량
+    시그니처를 아직 한 번도 기록한 적 없는 최초 상태)이어도 진행을 막지 않는다 —
+    "모른다"는 "이미 최신"과 다르다."""
+    current = _aihub_update_job_status()
+    if current.get("status") in ("checking", "downloading", "ingesting"):
+        return JSONResponse({"error": "이미 업데이트가 진행 중입니다"}, status_code=409)
+
+    loop = asyncio.get_event_loop()
+    check = await loop.run_in_executor(None, aihub_chem_ingest.check_for_updates)
+    if check.get("error"):
+        return JSONResponse({"error": f"최신본 확인 실패: {check['error']}"}, status_code=502)
+    if check.get("up_to_date") is True:
+        return JSONResponse({"error": "업데이트할 새 버전이 없습니다"}, status_code=409)
+
+    subprocess.Popen(
+        ["systemd-run", "--user", "--scope", "--quiet", "--",
+         str(_MSDS_PYTHON_BIN), "-m", "collect.aihub_chem_update_job"],
+        cwd=str(_ROOT),
+        env={**os.environ, "PYTHONPATH": str(_ROOT / "src")},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return JSONResponse({"status": "started"})
 
 
 _MSDS_SEARCH_SYSTEM_PROMPT = (

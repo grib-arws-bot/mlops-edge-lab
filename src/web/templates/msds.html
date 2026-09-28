@@ -29,6 +29,8 @@
   .msds-search-result-item.active { background: rgba(79,140,255,0.14); }
   .msds-search-result-item .name { flex: 1; }
   .msds-search-result-item .score-col { color: var(--muted); font-size: 0.76rem; white-space: nowrap; }
+  .aihub-result-item .formula { color: var(--muted); font-size: 0.78rem; margin-left: 6px; }
+  .aihub-result-item .prop-tag { display: inline-block; padding: 0 5px; border-radius: 6px; font-size: 0.68rem; margin-left: 4px; background: rgba(63,185,80,0.15); color: var(--normal); }
 </style>
 
 <div class="page-header">
@@ -94,8 +96,37 @@
     <div id="msds-detail-area"></div>
   </div>
 
+  <div class="card" style="grid-column: 1 / -1;">
+    <strong>2. 물성치 조회 (AI Hub)</strong>
+    <div class="why">한국산업안전보건공단 MSDS와는 별개로, AI Hub "화학물질 위험성 예측 데이터"({{ aihub_count }}개 화합물, CAS 기준 병합)에서 증기압·연소열·인화점 실측값과 분자 물성(분자량·밀도·logP 등)을 조회합니다. 예측 모델이 아니라 원본 실측치를 그대로 찾아 보여주는 조회 기능입니다.</div>
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button type="button" id="aihub-check-updates-btn" style="margin-top:0;" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>최신본 확인</button>
+      <span id="aihub-sync-result">
+        {% if aihub_sync_status %}
+          {% if aihub_sync_status.error %}
+          <span class="stat" style="display:inline;">최신본 확인 실패</span>
+          {% elif aihub_sync_status.up_to_date == true %}
+          <span class="stat" style="display:inline; color:var(--normal);">✓ 최신 상태입니다 ({{ aihub_sync_status.checked_at.split('T')[0] }} 확인)</span>
+          {% elif aihub_sync_status.up_to_date == false %}
+          <span class="stat" style="display:inline; color:var(--caution);">용량 시그니처가 달라졌습니다</span>
+          {% else %}
+          <span class="stat" style="display:inline;">아직 비교 기준 없음(최초 상태)</span>
+          {% endif %}
+        {% else %}
+        <span class="stat" style="display:inline;">아직 확인 안 됨 — "최신본 확인"을 눌러보세요</span>
+        {% endif %}
+      </span>
+      <button type="button" id="aihub-trigger-update-btn" style="margin-top:0; {% if not (aihub_sync_status and aihub_sync_status.up_to_date != true) %}display:none;{% endif %}" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>지금 업데이트</button>
+    </div>
+    <div class="stat" style="margin-top:4px; font-size:0.76rem;">AI Hub는 HuggingFace 같은 버전 해시를 제공하지 않아, 파일 용량(MB 반올림) 변화로만 갱신 여부를 근사 판단합니다.</div>
+    <div id="aihub-update-status" class="stat" style="margin-top:6px;"></div>
+    <input type="text" id="aihub-search-input" placeholder="예: 벤젠, benzene, 71-43-2" style="margin-top:10px;">
+    <div id="aihub-autocomplete-list" style="margin-top:8px; max-height:280px; overflow-y:auto;"></div>
+    <div id="aihub-detail-area"></div>
+  </div>
+
   <div class="card">
-    <strong>2. 전체 소스에서 검색</strong>
+    <strong>3. 전체 소스에서 검색</strong>
     <div class="why">질문을 하면 sLLM이 관련 문서 조각(산업안전 원본+MSDS, 범위 선택 가능)만 근거로 답합니다 — 근거에 없으면 "찾지 못했다"고 답하고, 답변 아래에 실제로 참고한 원문 조각을 그대로 보여줍니다.</div>
     <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
       <select id="msds-scope-select" class="msds-scope-select">
@@ -153,6 +184,163 @@ async function loadMsdsDetail(chemId) {
     <div class="stat" style="margin-top:10px; font-weight:600;">${escapeHtml(data.entry.name_ko)} (${escapeHtml(data.entry.name_en || '')}) — CAS ${escapeHtml(data.entry.cas_no || '없음')}</div>
     <table class="msds-detail-table"><tbody>${rows}</tbody></table>`;
 }
+
+let aihubAcTimer = null;
+document.getElementById('aihub-search-input').addEventListener('input', (e) => {
+  clearTimeout(aihubAcTimer);
+  const q = e.target.value.trim();
+  const list = document.getElementById('aihub-autocomplete-list');
+  if (q.length < 1) { list.innerHTML = ''; return; }
+  aihubAcTimer = setTimeout(async () => {
+    const res = await fetch(`/mlops/api/msds/property-autocomplete?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    list.innerHTML = data.results.map(r => `
+      <div class="msds-result-item aihub-result-item" data-cas="${escapeHtml(r.cas_number)}">
+        <span class="name">${escapeHtml(r.display_name)}</span><span class="formula">${escapeHtml(r.molecular_formula || '')}</span>
+        ${r.has_properties.map(p => `<span class="prop-tag">${escapeHtml(p)}</span>`).join('')}
+      </div>`).join('') || '<div class="stat">일치하는 물질이 없습니다.</div>';
+    list.querySelectorAll('.aihub-result-item').forEach(el => {
+      el.addEventListener('click', () => loadAihubDetail(el.dataset.cas));
+    });
+  }, 250);
+});
+
+const _aihubPropLabel = {
+  vapor_pressure: '증기압(vapor pressure)',
+  heat_combustion: '연소열(heat of combustion)',
+  flash_point: '인화점(flash point)',
+};
+
+function renderAihubPropertyTable(key, measurements) {
+  if (!measurements || !measurements.length) return '';
+  const valueKey = Object.keys(measurements[0]).find(k => k !== 'temp_kelvin' && k !== 'temp_celsius' && k !== 'datasource');
+  const rows = measurements.map(m => `
+    <tr>
+      <td>${m[valueKey] ?? '-'}</td>
+      <td>${m.temp_celsius != null ? m.temp_celsius + ' ℃' : '-'}</td>
+      <td>${m.datasource ? `<a href="${escapeHtml(m.datasource)}" target="_blank" rel="noopener">${escapeHtml(m.datasource)}</a>` : '-'}</td>
+    </tr>`).join('');
+  return `
+    <div class="stat" style="margin-top:10px; font-weight:600;">${_aihubPropLabel[key] || key}</div>
+    <table class="msds-detail-table"><thead><tr><th style="width:auto;">측정값</th><th style="width:auto;">온도</th><th style="width:auto;">출처</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function loadAihubDetail(cas) {
+  document.getElementById('aihub-autocomplete-list').innerHTML = '';
+  const area = document.getElementById('aihub-detail-area');
+  area.innerHTML = '<div class="stat" style="margin-top:10px;">불러오는 중...</div>';
+  const res = await fetch(`/mlops/api/msds/property-detail/${encodeURIComponent(cas)}`);
+  const data = await res.json();
+  if (!res.ok) { area.innerHTML = `<div class="stat" style="margin-top:10px;">${escapeHtml(data.error || '조회 실패')}</div>`; return; }
+  const commonRows = [
+    ['CAS 번호', data.cas_number], ['IUPAC명', data.iupac_name], ['분자식', data.molecular_formula],
+    ['분자량', data.mw], ['밀도', data.density], ['logP', data.logp], ['TPSA', data.tpsa],
+    ['끓는점', data.bp != null ? data.bp + ' ℃' : null], ['녹는점', data.mp != null ? data.mp + ' ℃' : null],
+    ['굴절률', data.refractive_index],
+  ].filter(([, v]) => v !== null && v !== undefined && v !== '')
+   .map(([label, v]) => `<tr><th>${label}</th><td>${escapeHtml(String(v))}</td></tr>`).join('');
+  const propTables = Object.keys(_aihubPropLabel).map(k => renderAihubPropertyTable(k, data.properties[k])).join('');
+  const msdsLink = data.msds_chem_id
+    ? `<button type="button" onclick="loadMsdsDetail('${escapeHtml(data.msds_chem_id)}'); document.getElementById('msds-detail-area').scrollIntoView({behavior:'smooth'});" style="margin-top:8px;">MSDS 원문 같이 보기</button>`
+    : '';
+  area.innerHTML = `
+    <div class="stat" style="margin-top:10px; font-weight:600;">${escapeHtml(data.display_name)}</div>
+    <table class="msds-detail-table"><tbody>${commonRows}</tbody></table>
+    ${propTables || '<div class="stat" style="margin-top:8px;">실측 물성치(증기압/연소열/인화점) 데이터 없음 — 분자 물성만 계산됨</div>'}
+    ${msdsLink}`;
+}
+
+function renderAihubSyncResult(sync) {
+  const el = document.getElementById('aihub-sync-result');
+  const triggerBtn = document.getElementById('aihub-trigger-update-btn');
+  if (!sync) { el.innerHTML = ''; return; }
+  if (sync.error) {
+    el.innerHTML = '<span class="stat" style="display:inline;">최신본 확인 실패</span>';
+    triggerBtn.style.display = 'none';
+  } else if (sync.up_to_date === true) {
+    el.innerHTML = `<span class="stat" style="display:inline; color:var(--normal);">✓ 최신 상태입니다 (${escapeHtml((sync.checked_at || '').split('T')[0])} 확인)</span>`;
+    triggerBtn.style.display = 'none';
+  } else if (sync.up_to_date === false) {
+    el.innerHTML = '<span class="stat" style="display:inline; color:var(--caution);">용량 시그니처가 달라졌습니다</span>';
+    triggerBtn.style.display = 'inline-block';
+    triggerBtn.disabled = false;
+  } else {
+    el.innerHTML = '<span class="stat" style="display:inline;">아직 비교 기준 없음(최초 상태)</span>';
+    triggerBtn.style.display = 'inline-block';
+    triggerBtn.disabled = false;
+  }
+}
+
+document.getElementById('aihub-check-updates-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('aihub-check-updates-btn');
+  const statusEl = document.getElementById('aihub-update-status');
+  btn.disabled = true;
+  statusEl.textContent = '↺ 확인 중...';
+  try {
+    const res = await fetch('/mlops/api/msds/aihub-check-updates', { method: 'POST' });
+    const data = await res.json();
+    renderAihubSyncResult(data);
+    statusEl.textContent = '';
+  } catch (e) {
+    statusEl.textContent = '확인 중 오류가 발생했습니다.';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+const _aihubUpdateStageLabel = {
+  checking: '최신본 확인 중', downloading: '라벨 데이터 재다운로드 중',
+  ingesting: '재추출·카탈로그 재빌드 중',
+  done: '완료', noop: '이미 최신본', error: '오류',
+};
+
+async function pollAihubUpdateStatus() {
+  const statusEl = document.getElementById('aihub-update-status');
+  const triggerBtn = document.getElementById('aihub-trigger-update-btn');
+  const checkBtn = document.getElementById('aihub-check-updates-btn');
+  const res = await fetch('/mlops/api/msds/aihub-update-status');
+  const data = await res.json();
+  const label = _aihubUpdateStageLabel[data.status] || data.status;
+  statusEl.textContent = `↺ ${label}${data.detail ? ' — ' + data.detail : ''}`;
+  if (['checking', 'downloading', 'ingesting'].includes(data.status)) {
+    setTimeout(pollAihubUpdateStatus, 5000);
+    return;
+  }
+  checkBtn.disabled = false;
+  if (data.status === 'done') {
+    statusEl.textContent = `완료 — ${data.ingested_count || ''}개 화합물 반영됨. 새로고침하면 조회에 반영됩니다.`;
+    triggerBtn.style.display = 'none';
+  } else if (data.status === 'error') {
+    statusEl.textContent = `업데이트 실패 — ${data.detail || ''}`;
+    triggerBtn.disabled = false;
+  } else if (data.status === 'noop') {
+    statusEl.textContent = '용량 시그니처 기준 이미 최신본이라 업데이트할 게 없습니다.';
+    triggerBtn.style.display = 'none';
+  }
+}
+
+{% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}
+setTimeout(pollAihubUpdateStatus, 1000);
+{% endif %}
+
+document.getElementById('aihub-trigger-update-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('aihub-trigger-update-btn');
+  const checkBtn = document.getElementById('aihub-check-updates-btn');
+  const statusEl = document.getElementById('aihub-update-status');
+  btn.disabled = true;
+  checkBtn.disabled = true;
+  statusEl.textContent = '↺ 업데이트 시작 중...';
+  try {
+    const res = await fetch('/mlops/api/msds/aihub-trigger-update', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || '시작 실패'; btn.disabled = false; checkBtn.disabled = false; return; }
+    setTimeout(pollAihubUpdateStatus, 2000);
+  } catch (e) {
+    statusEl.textContent = '업데이트 시작 중 오류가 발생했습니다.';
+    btn.disabled = false;
+    checkBtn.disabled = false;
+  }
+});
 
 let lastSearchResults = [];
 
