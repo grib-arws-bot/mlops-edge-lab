@@ -41,8 +41,8 @@
 </div>
 
 <div class="card">
-  <strong>데이터 출처</strong>
-  <div class="why">"산업안전"과 "MSDS"는 서로 다른 원본입니다 — 완전히 별개로 수집·관리됩니다.</div>
+  <strong>데이터 출처 (3종)</strong>
+  <div class="why">"산업안전"·"MSDS"·"AI Hub 물성치"는 서로 다른 원본입니다 — 완전히 별개로 수집·관리됩니다.</div>
   <table class="msds-source-table">
     <thead><tr><th>도메인</th><th>출처</th><th>데이터양</th></tr></thead>
     <tbody>
@@ -56,50 +56,41 @@
         <td>{{ source_summary.msds.origin }}</td>
         <td class="count">{{ source_summary.msds.doc_count }}건 물질 · {{ source_summary.msds.chunk_count }}개 청크</td>
       </tr>
+      <tr>
+        <td><span class="msds-tag" style="background: rgba(255,159,10,0.18); color:#ff9f0a;">AI Hub</span></td>
+        <td>{{ source_summary.aihub.origin }}</td>
+        <td class="count">{{ source_summary.aihub.doc_count }}건 화합물</td>
+      </tr>
     </tbody>
   </table>
-  <div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-    <button type="button" id="msds-check-updates-btn" style="margin-top:0;" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>최신본 확인</button>
-    <span id="msds-sync-result">
-      {% if sync_status %}
-        {% if sync_status.error %}
-        <span class="stat" style="display:inline;">최신본 확인 실패</span>
-        {% elif sync_status.up_to_date == true %}
-        <span class="stat" style="display:inline; color:var(--normal);">✓ 최신 상태입니다 ({{ sync_status.checked_at.split('T')[0] }} 확인)</span>
-        {% elif sync_status.up_to_date == false %}
-        <span class="stat" style="display:inline; color:var(--caution);">새 버전이 있습니다</span>
+
+  <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--border);">
+    <div class="stat" style="font-weight:600; margin-bottom:6px;">MSDS 최신화</div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button type="button" id="msds-check-updates-btn" style="margin-top:0;" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>최신본 확인</button>
+      <span id="msds-sync-result">
+        {% if sync_status %}
+          {% if sync_status.error %}
+          <span class="stat" style="display:inline;">최신본 확인 실패</span>
+          {% elif sync_status.up_to_date == true %}
+          <span class="stat" style="display:inline; color:var(--normal);">✓ 최신 상태입니다 ({{ sync_status.checked_at.split('T')[0] }} 확인)</span>
+          {% elif sync_status.up_to_date == false %}
+          <span class="stat" style="display:inline; color:var(--caution);">새 버전이 있습니다</span>
+          {% else %}
+          <span class="stat" style="display:inline;">아직 확인 안 됨</span>
+          {% endif %}
         {% else %}
-        <span class="stat" style="display:inline;">아직 확인 안 됨</span>
+        <span class="stat" style="display:inline;">아직 확인 안 됨 — "최신본 확인"을 눌러보세요</span>
         {% endif %}
-      {% else %}
-      <span class="stat" style="display:inline;">아직 확인 안 됨 — "최신본 확인"을 눌러보세요</span>
-      {% endif %}
-    </span>
-    <button type="button" id="msds-trigger-update-btn" style="margin-top:0; {% if not (sync_status and sync_status.up_to_date == false) %}display:none;{% endif %}" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>지금 업데이트</button>
-  </div>
-  <div id="msds-update-status" class="stat" style="margin-top:6px;"></div>
-</div>
-
-{% if not index_available %}
-<div class="card">
-  <strong>인덱스 없음</strong>
-  <div class="why">아직 RAG 인덱스가 준비되지 않았습니다 — 서버에서 <code>rag/build_index.py</code>를 실행해야 합니다. 물질 선택(카탈로그 조회)은 인덱스 없이도 동작합니다.</div>
-</div>
-{% endif %}
-
-<div class="msds-layout">
-  <div class="card">
-    <strong>1. 물질 선택</strong>
-    <div class="why">물질명·영문명·CAS 번호로 찾아서 MSDS 16개 항목 원문을 그대로 봅니다(검색이 아니라 카탈로그 조회라 즉시 결과가 나옵니다).</div>
-    <input type="text" id="msds-search-input" placeholder="예: 벤젠, Benzene, 71-43-2" style="margin-top:8px;">
-    <div id="msds-autocomplete-list" style="margin-top:8px; max-height:280px; overflow-y:auto;"></div>
-    <div id="msds-detail-area"></div>
+      </span>
+      <button type="button" id="msds-trigger-update-btn" style="margin-top:0; {% if not (sync_status and sync_status.up_to_date == false) %}display:none;{% endif %}" {% if update_job_status.status in ['checking','downloading','ingesting','indexing'] %}disabled{% endif %}>지금 업데이트</button>
+    </div>
+    <div id="msds-update-status" class="stat" style="margin-top:6px;"></div>
   </div>
 
-  <div class="card" style="grid-column: 1 / -1;">
-    <strong>2. 물성치 조회 (AI Hub)</strong>
-    <div class="why">한국산업안전보건공단 MSDS와는 별개로, AI Hub "화학물질 위험성 예측 데이터"({{ aihub_count }}개 화합물, CAS 기준 병합)에서 증기압·연소열·인화점 실측값과 분자 물성(분자량·밀도·logP 등)을 조회합니다. 예측 모델이 아니라 원본 실측치를 그대로 찾아 보여주는 조회 기능입니다.</div>
-    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--border);">
+    <div class="stat" style="font-weight:600; margin-bottom:6px;">AI Hub 최신화 <span style="font-weight:400;">— 버전 해시가 없어 파일 용량(MB 반올림) 시그니처 비교로 근사 판단</span></div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
       <button type="button" id="aihub-check-updates-btn" style="margin-top:0;" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>최신본 확인</button>
       <span id="aihub-sync-result">
         {% if aihub_sync_status %}
@@ -118,14 +109,35 @@
       </span>
       <button type="button" id="aihub-trigger-update-btn" style="margin-top:0; {% if not (aihub_sync_status and aihub_sync_status.up_to_date != true) %}display:none;{% endif %}" {% if aihub_update_job_status.status in ['checking','downloading','ingesting'] %}disabled{% endif %}>지금 업데이트</button>
     </div>
-    <div class="stat" style="margin-top:4px; font-size:0.76rem;">AI Hub는 HuggingFace 같은 버전 해시를 제공하지 않아, 파일 용량(MB 반올림) 변화로만 갱신 여부를 근사 판단합니다.</div>
     <div id="aihub-update-status" class="stat" style="margin-top:6px;"></div>
-    <input type="text" id="aihub-search-input" placeholder="예: 벤젠, benzene, 71-43-2" style="margin-top:10px;">
+  </div>
+</div>
+
+{% if not index_available %}
+<div class="card">
+  <strong>인덱스 없음</strong>
+  <div class="why">아직 RAG 인덱스가 준비되지 않았습니다 — 서버에서 <code>rag/build_index.py</code>를 실행해야 합니다. 물질 선택(카탈로그 조회)은 인덱스 없이도 동작합니다.</div>
+</div>
+{% endif %}
+
+<div class="msds-layout">
+  <div class="card">
+    <strong>1. 물질 선택</strong>
+    <div class="why">물질명·영문명·CAS 번호로 찾아서 MSDS 16개 항목 원문을 그대로 봅니다(검색이 아니라 카탈로그 조회라 즉시 결과가 나옵니다).</div>
+    <input type="text" id="msds-search-input" placeholder="예: 벤젠, Benzene, 71-43-2" style="margin-top:8px;">
+    <div id="msds-autocomplete-list" style="margin-top:8px; max-height:280px; overflow-y:auto;"></div>
+    <div id="msds-detail-area"></div>
+  </div>
+
+  <div class="card">
+    <strong>2. 물성치 조회 (AI Hub)</strong>
+    <div class="why">한국산업안전보건공단 MSDS와는 별개로, AI Hub "화학물질 위험성 예측 데이터"({{ aihub_count }}개 화합물, CAS 기준 병합)에서 증기압·연소열·인화점 실측값과 분자 물성(분자량·밀도·logP 등)을 조회합니다. 예측 모델이 아니라 원본 실측치를 그대로 찾아 보여주는 조회 기능입니다. 최신화 상태는 위 "데이터 출처" 카드에서 확인·갱신합니다.</div>
+    <input type="text" id="aihub-search-input" placeholder="예: 벤젠, benzene, 71-43-2" style="margin-top:8px;">
     <div id="aihub-autocomplete-list" style="margin-top:8px; max-height:280px; overflow-y:auto;"></div>
     <div id="aihub-detail-area"></div>
   </div>
 
-  <div class="card">
+  <div class="card" style="grid-column: 1 / -1;">
     <strong>3. 전체 소스에서 검색</strong>
     <div class="why">질문을 하면 sLLM이 관련 문서 조각(산업안전 원본+MSDS, 범위 선택 가능)만 근거로 답합니다 — 근거에 없으면 "찾지 못했다"고 답하고, 답변 아래에 실제로 참고한 원문 조각을 그대로 보여줍니다.</div>
     <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
@@ -205,11 +217,13 @@ document.getElementById('aihub-search-input').addEventListener('input', (e) => {
   }, 250);
 });
 
+// 단위는 AI Hub 공식 데이터 설명서로 교차 확인함(2026-09-28) — vp=Pa, heat_comb=kJ/mol, fp=℃.
 const _aihubPropLabel = {
   vapor_pressure: '증기압(vapor pressure)',
   heat_combustion: '연소열(heat of combustion)',
   flash_point: '인화점(flash point)',
 };
+const _aihubPropUnit = { vapor_pressure: 'Pa', heat_combustion: 'kJ/mol', flash_point: '℃' };
 
 function renderAihubPropertyTable(key, measurements) {
   if (!measurements || !measurements.length) return '';
@@ -222,7 +236,7 @@ function renderAihubPropertyTable(key, measurements) {
     </tr>`).join('');
   return `
     <div class="stat" style="margin-top:10px; font-weight:600;">${_aihubPropLabel[key] || key}</div>
-    <table class="msds-detail-table"><thead><tr><th style="width:auto;">측정값</th><th style="width:auto;">온도</th><th style="width:auto;">출처</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table class="msds-detail-table"><thead><tr><th style="width:auto;">측정값(${_aihubPropUnit[key] || ''})</th><th style="width:auto;">온도</th><th style="width:auto;">출처</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 async function loadAihubDetail(cas) {

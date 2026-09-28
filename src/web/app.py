@@ -773,6 +773,12 @@ def _msds_source_summary() -> dict:
             "doc_count": len(_state.get("msds_catalog") or []),
             "chunk_count": sum(1 for m in meta if m["source"].startswith("msds_")),
         },
+        "aihub": {
+            "label": "AI Hub 물성치",
+            "origin": "AI Hub \"화학물질 위험성 예측 데이터\"(dataset 71816, 라벨링데이터) — CAS 번호로 병합, 증기압·연소열·인화점 실측치 + 계산된 분자 물성. RAG 검색(전체 소스 검색)에는 포함되지 않고 카탈로그 조회 전용",
+            "doc_count": len(_state.get("aihub_properties") or []),
+            "chunk_count": None,
+        },
     }
 
 
