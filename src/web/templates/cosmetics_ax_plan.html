@@ -114,7 +114,15 @@
 <div class="card">
   <strong>5. 파이프라인 구조 — 모델별 파인튜닝·RAG 매핑</strong>
   <div class="why">강원은 4축 예측모델 + sLLM Agent로 총 5개, 충북은 정형 ML 4개(그중 SHAP은 별도 학습 없는 사후설명 기법)입니다. 파인튜닝·RAG·Agent(도구호출)는 강원의 sLLM 한 곳에만 해당됩니다.</div>
-  <div class="stat" style="margin-top:8px; font-weight:600;">강원 — M1·M2·M3는 "순차"가 아니라 "각자 다른 장비에 붙는 병렬" 모델입니다. M4(예지보전)만 3개 설비 전체에 공통 적용됩니다(제안서 원문 "3대설비공통"). 가로 = 파이프라인 단계, 세로 = 장비·모델. 맨 끝에서 4개 모델 출력이 전부 AI Agent로 모입니다.</div>
+  <div class="stat" style="margin-top:8px; font-weight:600;">강원 — M1·M2·M3는 "순차"가 아니라 "각자 다른 장비에 붙는 병렬" 모델입니다. M4(예지보전)만 3개 설비 전체에 공통 적용됩니다(제안서 원문 "3대설비공통"). M5(sLLM Agent)도 같은 레인 형식으로 그렸고, 이 레인 안에서 파인튜닝·RAG가 각각 하나의 단계로 들어갑니다. 가로 = 파이프라인 단계, 세로 = 장비·모델. 맨 끝에서 4개 모델 출력이 전부 M5의 서빙 단계(Agent 오케스트레이션)로 모입니다.</div>
+
+  <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; font-size:0.78rem; align-items:center;">
+    <span style="color:var(--muted);">두 과제에서 재사용 가능한 모듈(같은 색 = 강원·충북 공통):</span>
+    <span><span style="display:inline-block; width:12px; height:12px; background:#2b4c7e; border-radius:3px; margin-right:4px; vertical-align:-1px;"></span>Model Registry(동일 도구)</span>
+    <span><span style="display:inline-block; width:12px; height:12px; background:#8a5a2b; border-radius:3px; margin-right:4px; vertical-align:-1px;"></span>예지보전(IsolationForest 계열, cross-cutting)</span>
+    <span><span style="display:inline-block; width:12px; height:12px; background:#2b7e4c; border-radius:3px; margin-right:4px; vertical-align:-1px;"></span>XGBoost 계열(학습 하네스 재사용 여지)</span>
+  </div>
+
   <div class="mermaid" style="margin-top:8px; background:#12151b; border:1px solid var(--border); border-radius:10px; padding:12px;">
 flowchart LR
     subgraph ROW1["천연물 추출기 — M1 (단독)"]
@@ -133,14 +141,27 @@ flowchart LR
         direction LR
         R4E["추출기+발효기+고압균질기&lt;br/&gt;(설비 3개 전체)"] --> R4S["센서&lt;br/&gt;모터전류·진동(공통)"] --> R4P["전처리&lt;br/&gt;FFT/웨이블릿"] --> R4T["M4 학습&lt;br/&gt;IsolationForest→RF"] --> R4R["Registry"] --> R4O["서빙&lt;br/&gt;이상탐지 알람"]
     end
+    subgraph ROW5["지식소스+베이스sLLM — M5 (전 레인 통합)"]
+        direction LR
+        R5E["SOP·원료특성·매뉴얼·COA양식&lt;br/&gt;+ 베이스 sLLM"] --> R5RAG["RAG 인덱싱&lt;br/&gt;청킹+임베딩"] --> R5FT["파인튜닝(LoRA)&lt;br/&gt;현장 대화체·COA생성체"] --> R5R["Registry"] --> R5O["서빙&lt;br/&gt;Agent 오케스트레이션(도구호출)"]
+    end
 
-    R1O & R2O & R3O & R4O --> AGENT["M5 AI Agent (sLLM)&lt;br/&gt;4개 모델을 도구로 호출"]
-    RAG[("RAG&lt;br/&gt;SOP·원료특성·매뉴얼")] -. 검색근거 .-> AGENT
-    FT[("파인튜닝(LoRA)&lt;br/&gt;대화체·COA생성")] -. 말투학습 .-> AGENT
-    AGENT --> UI["대화형UI+대시보드&lt;br/&gt;Human-in-the-loop 승인"]
+    R1O -- 도구호출 --> R5O
+    R2O -- 도구호출 --> R5O
+    R3O -- 도구호출 --> R5O
+    R4O -- 도구호출 --> R5O
+    R5O --> UI["대화형UI+대시보드&lt;br/&gt;Human-in-the-loop 승인"]
+
+    classDef infra fill:#2b4c7e,color:#fff,stroke:#4a7cc7;
+    classDef pdm fill:#8a5a2b,color:#fff,stroke:#c78a4a;
+    classDef xgb fill:#2b7e4c,color:#fff,stroke:#4ac77c;
+
+    class R1R,R2R,R3R,R4R,R5R infra;
+    class R4E,R4S,R4P,R4T,R4O pdm;
+    class R1E,R1S,R1P,R1T,R1O xgb;
   </div>
 
-  <div class="stat" style="margin-top:16px; font-weight:600;">충북 — M1·M2도 같은 설비 데이터를 쓰지만 서로 다른 목적(수치예측 vs 합격판정)으로 별도 학습됩니다. M3(SHAP)는 새 데이터가 아니라 M1·M2가 학습을 마친 뒤 그 모델 자체를 설명하는 사후 기법이라 별도 행이 아니라 M1·M2에서 갈라져 나오는 것으로 그렸습니다. Agent가 없어 대시보드로 바로 모입니다.</div>
+  <div class="stat" style="margin-top:16px; font-weight:600;">충북 — M1·M2도 같은 설비 데이터를 쓰지만 서로 다른 목적(수치예측 vs 합격판정)으로 별도 학습됩니다. M3(SHAP)는 새 데이터가 아니라 M1·M2가 학습을 마친 뒤 그 모델 자체를 설명하는 사후 기법이라 별도 행이 아니라 M1·M2에서 갈라져 나오는 것으로 그렸습니다. Agent가 없어 대시보드로 바로 모입니다. 색은 강원 다이어그램과 동일한 기준으로 칠했습니다.</div>
   <div class="mermaid" style="margin-top:8px; background:#12151b; border:1px solid var(--border); border-radius:10px; padding:12px;">
 flowchart LR
     subgraph ROWB1["믹서 설비 — M1 (단독)"]
@@ -161,6 +182,14 @@ flowchart LR
     B3 --> B3O["서빙&lt;br/&gt;불량원인 리포트"]
 
     B1O & B2O & B3O & B4O --> DASH["대시보드&lt;br/&gt;Agent/RAG 없음, 수치·알람 직접 표시"]
+
+    classDef infra fill:#2b4c7e,color:#fff,stroke:#4a7cc7;
+    classDef pdm fill:#8a5a2b,color:#fff,stroke:#c78a4a;
+    classDef xgb fill:#2b7e4c,color:#fff,stroke:#4ac77c;
+
+    class B1R,B2R,B4R infra;
+    class B4E,B4S,B4P,B4T,B4O pdm;
+    class B1E,B1S,B1P,B1T,B1O,B2E,B2S,B2P,B2T,B2O xgb;
   </div>
 
   <table class="plan-table" style="margin-top:16px;">
